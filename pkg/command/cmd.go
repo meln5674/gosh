@@ -43,7 +43,7 @@ func (e *MultiProcessError) Error() string {
 	return msg.String()
 }
 
-// FanOut runs multiple process-like tasks with a maximum number of concurrent tasks
+// FanOut runs multiple process-like tasks with a maximum number of concurrent tasks, like the shell & operator
 func FanOut(parallelCount int, cmds ...Commander) error {
 	log.Println(parallelCount, len(cmds))
 	cmdChan := make(chan Commander)
@@ -426,4 +426,250 @@ func (p *Pipeline) Kill() error {
 		return &MultiProcessError{Errors: errs}
 	}
 	return nil
+}
+
+type sequenceEvent struct {
+	kill *struct{}
+	err  *ixerr
+	next *int
+}
+
+// An And runs a sequence of tasks, stopping at the first failure, like the shell && operator
+type And struct {
+	// Cmds are the tasks to run
+	Cmds   []*Cmd
+	events chan sequenceEvent
+	result chan error
+}
+
+var (
+	_ = Commander(&And{})
+)
+
+// Run implements Commander
+func (a *And) Run() error {
+	for _, cmd := range a.Cmds {
+		err := cmd.Run()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *And) Start() error {
+	a.events = make(chan sequenceEvent)
+	a.result = make(chan error)
+	go func() {
+		defer func() {
+			r := recover()
+			if r != nil {
+				// TODO: Send result
+			}
+		}()
+		for ix, cmd := range a.Cmds {
+			go func(ix int, cmd *Cmd) {
+				defer func() {
+					r := recover()
+					if r != nil {
+						// TODO: send event
+					}
+				}()
+				err := cmd.Run()
+				if err != nil {
+					a.events <- sequenceEvent{err: &ixerr{ix: ix, err: err}}
+					return
+				}
+				a.events <- sequenceEvent{next: &ix}
+			}(ix, cmd)
+			event := <-a.events
+			if event.kill != nil {
+				// TODO: kill current process
+				return
+			}
+			if event.err != nil {
+				a.result <- event.err.err
+				return
+			}
+			if event.next != nil {
+				continue
+			}
+		}
+		a.result <- nil
+	}()
+	// TODO: Should at least the first process be started synchronously?
+	return nil
+}
+
+func (a *And) Kill() error {
+	for _, cmd := range a.Cmds {
+		cmd.Kill()
+	}
+	// TODO: Should this return a MultiProcessError?
+	return nil
+}
+
+func (a *And) Wait() error {
+	return <-a.result
+}
+
+// An Or runs a sequence of tasks, stopping at the first success, like the shell || operator
+type Or struct {
+	// Cmds are the tasks to run
+	Cmds   []*Cmd
+	events chan sequenceEvent
+	result chan error
+}
+
+var (
+	_ = Commander(&Or{})
+)
+
+// Run implements Commander
+func (o *Or) Run() error {
+	for _, cmd := range o.Cmds {
+		err := cmd.Run()
+		if err == nil {
+			break
+		}
+	}
+	return nil
+}
+
+func (o *Or) Start() error {
+	o.events = make(chan sequenceEvent)
+	o.result = make(chan error)
+	go func() {
+		defer func() {
+			r := recover()
+			if r != nil {
+				// TODO: Send result
+			}
+		}()
+		for ix, cmd := range o.Cmds {
+			go func(ix int, cmd *Cmd) {
+				defer func() {
+					r := recover()
+					if r != nil {
+						// TODO: send event
+					}
+				}()
+				err := cmd.Run()
+				if err != nil {
+					o.events <- sequenceEvent{err: &ixerr{ix: ix, err: err}}
+					return
+				}
+				o.events <- sequenceEvent{next: &ix}
+			}(ix, cmd)
+			event := <-o.events
+			if event.kill != nil {
+				// TODO: kill current process
+				return
+			}
+			if event.err != nil {
+				continue
+			}
+			if event.next != nil {
+				return
+			}
+		}
+		o.result <- nil
+	}()
+	return nil
+}
+
+func (o *Or) Kill() error {
+	// TODO: Should these be killed in reverse?
+	for _, cmd := range o.Cmds {
+		cmd.Kill()
+	}
+	// TODO: Should this return a MultiProcessError?
+	return nil
+}
+
+func (o *Or) Wait() error {
+	return <-o.result
+}
+
+// A Then runs a sequence of tasks, ignoring, but recording, any fialures, like the shell ; operator
+type Then struct {
+	// Cmds are the tasks to run
+	Cmds   []*Cmd
+	events chan sequenceEvent
+	result chan error
+}
+
+var (
+	_ = Commander(&Then{})
+)
+
+// Run implements Commander
+func (t *Then) Run() error {
+	errs := make([]error, 0, len(t.Cmds))
+	for _, cmd := range t.Cmds {
+		err := cmd.Run()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) != 0 {
+		return &MultiProcessError{Errors: errs}
+	}
+	return nil
+}
+
+func (t *Then) Start() error {
+	t.events = make(chan sequenceEvent)
+	t.result = make(chan error)
+	go func() {
+		defer func() {
+			r := recover()
+			if r != nil {
+				// TODO: Send result
+			}
+		}()
+		for ix, cmd := range t.Cmds {
+			go func(ix int, cmd *Cmd) {
+				defer func() {
+					r := recover()
+					if r != nil {
+						// TODO: send event
+					}
+				}()
+				err := cmd.Run()
+				if err != nil {
+					t.events <- sequenceEvent{err: &ixerr{ix: ix, err: err}}
+					return
+				}
+				t.events <- sequenceEvent{next: &ix}
+			}(ix, cmd)
+			event := <-t.events
+			if event.kill != nil {
+				// TODO: kill current process
+				return
+			}
+			if event.err != nil {
+				// TODO: Should this err be recorded?
+				continue
+			}
+			if event.next != nil {
+				continue
+			}
+		}
+		t.result <- nil
+	}()
+	return nil
+}
+
+func (t *Then) Kill() error {
+	// TODO: Should these be killed in reverse?
+	for _, cmd := range t.Cmds {
+		cmd.Kill()
+	}
+	// TODO: Should this return a MultiProcessError?
+	return nil
+}
+
+func (t *Then) Wait() error {
+	return <-t.result
 }
