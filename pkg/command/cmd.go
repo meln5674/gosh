@@ -10,19 +10,28 @@ import (
 	"strings"
 )
 
+// A PipeProcessor is a function which can process the output of a command
 type PipeProcessor func(io.Reader) error
 
+// A Commander can be ran, started, killed, and waited for like a process
 type Commander interface {
+	// Start runs the task in the background and returns immediately
 	Start() error
+	// Wait waits for a task to finish after it has been Start()'ed
 	Wait() error
-	Run() error
+	// Kill forcefully terminates the task
 	Kill() error
+	// Run starts the task in the foreground and waits for it to finish
+	Run() error
 }
 
+// A MultiProcessError indicates one or more proceses, either in serial or parallel, failed
 type MultiProcessError struct {
+	// Errors are the errors that occurred. Order is not guaranteed.
 	Errors []error
 }
 
+// Error implements error
 func (e *MultiProcessError) Error() string {
 	msg := strings.Builder{}
 	msg.WriteString("One or more processes failed: (")
@@ -34,6 +43,7 @@ func (e *MultiProcessError) Error() string {
 	return msg.String()
 }
 
+// FanOut runs multiple process-like tasks with a maximum number of concurrent tasks
 func FanOut(parallelCount int, cmds ...Commander) error {
 	log.Println(parallelCount, len(cmds))
 	cmdChan := make(chan Commander)
@@ -82,17 +92,27 @@ func FanOut(parallelCount int, cmds ...Commander) error {
 	return nil
 }
 
+// A Cmd is a wrapper for building os/exec.Cmd's
 type Cmd struct {
 	*exec.Cmd
-	HandleStdout    PipeProcessor
+	// HandleStdout is the function, if any, to feed stdout to
+	HandleStdout PipeProcessor
+	// HandleStdoutErr is a channel that will be send the error returned by HandleStdout
 	HandleStdoutErr chan error
-	Closers         []io.Closer
+	// Closers is a set of things that should be closed after the Cmd finishes
+	Closers []io.Closer
 }
 
+var (
+	_ = Commander(&Cmd{})
+)
+
+// Command returns a new command
 func Command(ctx context.Context, cmd ...string) *Cmd {
 	return &Cmd{Cmd: exec.CommandContext(ctx, cmd[0], cmd[1:]...), Closers: make([]io.Closer, 0)}
 }
 
+// ForwardAll forwards stdin/out/err to/from the current process from/to this Cmd
 func (c *Cmd) ForwardAll() *Cmd {
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
@@ -100,28 +120,33 @@ func (c *Cmd) ForwardAll() *Cmd {
 	return c
 }
 
+// ForwardOutErr forwards stdout/err to the current process from this Cmd
 func (c *Cmd) ForwardOutErr() *Cmd {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c
 }
 
+// ForwardErr forward stderr to the current process from this Cmd
 func (c *Cmd) ForwardErr() *Cmd {
 	c.Stderr = os.Stderr
 	return c
 }
 
+// ProcessOut sets a function to feed the stdout of this Cmd into
 func (c *Cmd) ProcessOut(handler PipeProcessor) *Cmd {
 	c.HandleStdout = handler
 	c.HandleStdoutErr = make(chan error)
 	return c
 }
 
+// StringIn sets a literal string to be provided as stdin to this Cmd
 func (c *Cmd) StringIn(in string) *Cmd {
 	c.Stdin = strings.NewReader(in)
 	return c
 }
 
+// FileIn sets the path of a file whose contents are to be to redirected to this Cmd's stdin
 func (c *Cmd) FileIn(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -132,6 +157,7 @@ func (c *Cmd) FileIn(path string) error {
 	return nil
 }
 
+// FileOut sets the path of a file to redirect this Cmd's stdout to
 func (c *Cmd) FileOut(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -142,6 +168,7 @@ func (c *Cmd) FileOut(path string) error {
 	return nil
 }
 
+// FileOut sets the path of a file to redirect this Cmd's stderr to
 func (c *Cmd) FileErr(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -152,12 +179,14 @@ func (c *Cmd) FileErr(path string) error {
 	return nil
 }
 
+// WithParentEnv copies the current process's environment variables to this Cmd
 func (c *Cmd) WithParentEnv() *Cmd {
 	c.Env = make([]string, len(os.Environ()))
 	copy(c.Env, os.Environ())
 	return c
 }
 
+// WithEnv sets one or more environment variables for this Cmd. Note that if you do not call WithParentEnv() first, the current process's variables will not be passed.
 func (c *Cmd) WithEnv(env map[string]string) *Cmd {
 	envIndex := make(map[string]int, len(c.Cmd.Env))
 	for ix, envLine := range c.Cmd.Env {
@@ -202,6 +231,7 @@ func (c *Cmd) startStdoutProcessor() error {
 	return nil
 }
 
+// Run implements Commander
 func (c *Cmd) Run() error {
 	defer func() {
 		for _, closer := range c.Closers {
@@ -228,6 +258,7 @@ func (c *Cmd) Run() error {
 	return nil
 }
 
+// Start implements Commander
 func (c *Cmd) Start() error {
 	err := c.startStdoutProcessor()
 	if err != nil {
@@ -237,6 +268,7 @@ func (c *Cmd) Start() error {
 	return c.Cmd.Start()
 }
 
+// Wait implements Commander
 func (c *Cmd) Wait() error {
 	defer func() {
 		for _, closer := range c.Closers {
@@ -260,16 +292,26 @@ func (c *Cmd) Wait() error {
 	return nil
 }
 
+// Kill implements Commander
 func (c *Cmd) Kill() error {
 	return c.Cmd.Process.Kill()
 }
 
+// A Pipeline is two or more processes, run in parallel, which feed the stdout of each process to the next process's stdin like a standard shell pipe
 type Pipeline struct {
-	Cmds     []*Cmd
-	InPipes  []*os.File
+	// Cmds are the commands to run, in order
+	Cmds []*Cmd
+	// InPipes are the read side of the pipes
+	InPipes []*os.File
+	// OutPipes are the write side of the pipes
 	OutPipes []*os.File
 }
 
+var (
+	_ = Commander(&Pipeline{})
+)
+
+// NewPipeline creates a new pipeline
 func NewPipeline(cmd ...*Cmd) (*Pipeline, error) {
 	if len(cmd) < 2 {
 		return nil, fmt.Errorf("Need at least two commands for a pipeline")
@@ -291,6 +333,7 @@ func NewPipeline(cmd ...*Cmd) (*Pipeline, error) {
 	return &Pipeline{Cmds: cmd, InPipes: inPipes, OutPipes: outPipes}, nil
 }
 
+// ForwardErr forwrds the stderr of all commands in the pipeline to the current process
 func (p *Pipeline) ForwardErr() *Pipeline {
 	for _, cmd := range p.Cmds {
 		cmd.ForwardErr()
@@ -298,6 +341,7 @@ func (p *Pipeline) ForwardErr() *Pipeline {
 	return p
 }
 
+// Run implements Commander
 func (p *Pipeline) Run() error {
 	err := p.Start()
 	if err != nil {
@@ -311,6 +355,7 @@ func (p *Pipeline) Run() error {
 	return nil
 }
 
+// Start implements Commander
 func (p *Pipeline) Start() error {
 	for ix, cmd := range p.Cmds {
 		err := cmd.Start()
@@ -329,6 +374,7 @@ type ixerr struct {
 	err error
 }
 
+// Wait implements Commander
 func (p *Pipeline) Wait() error {
 	errs := make([]error, 0, len(p.Cmds))
 	// Iterating in reverse because if a downstream process, its writer may be blocking forever on its stdout
@@ -367,6 +413,7 @@ func (p *Pipeline) Wait() error {
 	return nil
 }
 
+// Kill implements Commander
 func (p *Pipeline) Kill() error {
 	errs := make([]error, 0, len(p.Cmds))
 	for _, cmd := range p.Cmds {
