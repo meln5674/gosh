@@ -6,10 +6,13 @@ import (
 
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/meln5674/gosh"
 	"io"
+	"io/ioutil"
 	"os"
+	"strings"
 )
 
 type testError struct {
@@ -68,7 +71,7 @@ func mockStd() (stdin, stdout, stderr *bytes.Buffer, start, close func()) {
 			if _, err := io.CopyN(stdinWrite, stdin, int64(stdin.Len())); err != nil {
 				panic(err)
 			}
-			if err := stdinWrite.Close(); err != nil {
+			if err := stdinWrite.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 				panic(err)
 			}
 		}()
@@ -117,7 +120,6 @@ var _ = Describe("Cmd", func() {
 			startMocks()
 			testSh := fmt.Sprintf("cat ; echo -n '%s' >&2", expectedStderr)
 			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh).ForwardAll()
-			fmt.Fprintln(stdout, "Command terminated")
 			Expect(cmd.Run()).To(Succeed())
 			stopMocks()
 			Expect(mockStdin.Len()).To(Equal(0))
@@ -137,7 +139,6 @@ var _ = Describe("Cmd", func() {
 			startMocks()
 			testSh := fmt.Sprintf("cat ; echo -n '%s' >&2", expectedStderr)
 			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh).ForwardOutErr()
-			fmt.Fprintln(stdout, "Command terminated")
 			Expect(cmd.Run()).To(Succeed())
 			stopMocks()
 			Expect(mockStderr.String()).To(Equal(expectedStderr))
@@ -156,12 +157,155 @@ var _ = Describe("Cmd", func() {
 			startMocks()
 			testSh := fmt.Sprintf("echo 'something' ; echo -n '%s' >&2", expectedStderr)
 			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh).ForwardErr()
-			fmt.Fprintln(stdout, "Command terminated")
 			Expect(cmd.Run()).To(Succeed())
 			stopMocks()
 			Expect(mockStderr.String()).To(Equal(expectedStderr))
 			Expect(mockStdout.String()).To(Equal(expectedStdout))
 		})
 	})
+	When("Processing out", func() {
 
+		It("should forward them", func() {
+			expectedStdout := "out"
+			expectedProcessedStdout := expectedStdout + expectedStdout + expectedStdout
+			startMocks()
+			testSh := fmt.Sprintf("echo -n '%s'", expectedStdout)
+			var processedOut string
+			cmd := gosh.
+				Command(context.TODO(), "bash", "-c", testSh).
+				ProcessOut(func(r io.Reader) error {
+					out, err := io.ReadAll(r)
+					if err != nil {
+						return err
+					}
+					processedOut = strings.Repeat(string(out), 3)
+					return nil
+				})
+			Expect(cmd.Run()).To(Succeed())
+			stopMocks()
+			Expect(processedOut).To(Equal(expectedProcessedStdout))
+		})
+	})
+	When("Using a string for in", func() {
+
+		It("should forward them", func() {
+			stdinString := "in"
+			startMocks()
+			testSh := fmt.Sprintf(`[ "$(cat)" == '%s' ]`, stdinString)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh).StringIn(stdinString)
+			Expect(cmd.Run()).To(Succeed())
+			stopMocks()
+			Expect(mockStdin.Len()).To(Equal(0))
+		})
+	})
+	When("Using a file for in", func() {
+
+		It("should forward them", func() {
+			stdinString := "in"
+			f, err := os.CreateTemp("", "*")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.Remove(f.Name())
+			_, err = f.Write([]byte(stdinString))
+			Expect(err).ToNot(HaveOccurred())
+			startMocks()
+			testSh := fmt.Sprintf(`[ "$(cat)" == '%s' ]`, stdinString)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileIn(f.Name())).To(Succeed())
+			Expect(cmd.Run()).To(Succeed())
+			stopMocks()
+		})
+	})
+	When("Using a missing file for in", func() {
+
+		It("should fail", func() {
+			startMocks()
+			testSh := fmt.Sprintf(`echo "This should fail"`)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileIn("this file doesn't exist")).ToNot(Succeed())
+			stopMocks()
+		})
+	})
+	When("Using a file for out", func() {
+
+		It("should forward them", func() {
+			expectedStdout := "out"
+			f, err := os.CreateTemp("", "*")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.Remove(f.Name())
+			startMocks()
+			testSh := fmt.Sprintf("echo -n '%s'", expectedStdout)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileOut(f.Name())).To(Succeed())
+			Expect(cmd.Run()).To(Succeed())
+			stopMocks()
+			actualStdout, err := ioutil.ReadFile(f.Name())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(actualStdout)).To(Equal(expectedStdout))
+		})
+	})
+	When("Using an unwritable file for out", func() {
+
+		It("should fail", func() {
+			expectedStdout := "out"
+			f, err := os.CreateTemp("", "*")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.Remove(f.Name())
+			st, err := f.Stat()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
+			startMocks()
+			testSh := fmt.Sprintf("echo -n '%s'", expectedStdout)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileOut(f.Name())).ToNot(Succeed())
+			stopMocks()
+		})
+	})
+	When("Using a file for err", func() {
+
+		It("should forward them", func() {
+			expectedStderr := "err"
+			f, err := os.CreateTemp("", "*")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.Remove(f.Name())
+			startMocks()
+			testSh := fmt.Sprintf("echo -n '%s' >&2", expectedStderr)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileErr(f.Name())).To(Succeed())
+			Expect(cmd.Run()).To(Succeed())
+			stopMocks()
+			actualStderr, err := ioutil.ReadFile(f.Name())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(actualStderr)).To(Equal(expectedStderr))
+		})
+	})
+	When("Using an unwritable file for err", func() {
+
+		It("should fail", func() {
+			expectedStderr := "err"
+			f, err := os.CreateTemp("", "*")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.Remove(f.Name())
+			st, err := f.Stat()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
+			startMocks()
+			testSh := fmt.Sprintf("echo -n '%s'", expectedStderr)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh)
+			Expect(cmd.FileErr(f.Name())).ToNot(Succeed())
+			stopMocks()
+		})
+	})
+
+	When("overriding parent environment variables", func() {
+		It("Should set specified variables and include all others", func() {
+			currentHome, err := os.UserHomeDir()
+			Expect(err).ToNot(HaveOccurred())
+			dummyHostname := "foo"
+			dummyVar := "BAR"
+			dummyVarValue := "baz"
+			testSh := fmt.Sprintf(`[ "${HOME}" == '%s' ] && [ "${HOSTNAME}" == '%s' ] && [ "${%s}" == '%s' ]`, currentHome, dummyHostname, dummyVar, dummyVarValue)
+			cmd := gosh.Command(context.TODO(), "bash", "-c", testSh).WithParentEnvAnd(map[string]string{"HOSTNAME": dummyHostname, dummyVar: dummyVarValue})
+			Expect(cmd.Run()).To(Succeed())
+		})
+	})
 })

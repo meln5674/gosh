@@ -156,6 +156,11 @@ func (c *Cmd) WithEnv(env map[string]string) *Cmd {
 	return c
 }
 
+// WithParentEnvAnd is a convienence wrapper for WithParentEnv() then WithEnv()
+func (c *Cmd) WithParentEnvAnd(env map[string]string) *Cmd {
+	return c.WithParentEnv().WithEnv(env)
+}
+
 func (c *Cmd) startStdoutProcessor() error {
 	if c.HandleStdout != nil {
 		stdout, err := c.Cmd.StdoutPipe()
