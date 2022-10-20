@@ -1,10 +1,10 @@
-package command
+package gosh
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"k8s.io/klog/v2"
 	"os"
 	"os/exec"
 	"strings"
@@ -43,55 +43,6 @@ func (e *MultiProcessError) Error() string {
 	return msg.String()
 }
 
-// FanOut runs multiple process-like tasks with a maximum number of concurrent tasks, like the shell & operator
-func FanOut(parallelCount int, cmds ...Commander) error {
-	log.Println(parallelCount, len(cmds))
-	cmdChan := make(chan Commander)
-	errChan := make(chan error)
-	sem := make(chan struct{})
-	go func() {
-		for _, cmd := range cmds {
-			cmdChan <- cmd
-		}
-		close(cmdChan)
-		log.Println("all commands pushed")
-	}()
-	for ix := 0; ix < parallelCount; ix++ {
-		go func() {
-			log.Println("fanout started")
-			defer func() {
-				sem <- struct{}{}
-				log.Println("sem++")
-				log.Println("fanout finished")
-			}()
-			for cmd := range cmdChan {
-				errChan <- cmd.Run()
-				log.Println("Wrote err")
-			}
-		}()
-	}
-	go func() {
-		for ix := 0; ix < parallelCount; ix++ {
-			_ = <-sem
-			log.Println("sem--")
-		}
-		log.Println("all fanouts finished")
-		close(errChan)
-	}()
-	errs := make([]error, 0, len(cmds))
-	for err := range errChan {
-		log.Println("Read err")
-		if err != nil {
-			errs = append(errs, err)
-		}
-	}
-	log.Println("all errors recorded")
-	if len(errs) != 0 {
-		return &MultiProcessError{Errors: errs}
-	}
-	return nil
-}
-
 // A Cmd is a wrapper for building os/exec.Cmd's
 type Cmd struct {
 	*exec.Cmd
@@ -108,8 +59,8 @@ var (
 )
 
 // Command returns a new command
-func Command(ctx context.Context, cmd ...string) *Cmd {
-	return &Cmd{Cmd: exec.CommandContext(ctx, cmd[0], cmd[1:]...), Closers: make([]io.Closer, 0)}
+func Command(ctx context.Context, cmd string, args ...string) *Cmd {
+	return &Cmd{Cmd: exec.CommandContext(ctx, cmd, args...), Closers: make([]io.Closer, 0)}
 }
 
 // ForwardAll forwards stdin/out/err to/from the current process from/to this Cmd
@@ -242,9 +193,9 @@ func (c *Cmd) Run() error {
 	if err != nil {
 		return err
 	}
-	log.Println(c.Path, c.Args)
+	klog.V(1).Info(c.Path, c.Args)
 	err = c.Cmd.Run()
-	log.Println("exited", c.Path, c.Args)
+	klog.V(1).Info("exited", c.Path, c.Args)
 	if err != nil {
 		return err
 	}
@@ -264,7 +215,7 @@ func (c *Cmd) Start() error {
 	if err != nil {
 		return err
 	}
-	log.Println(c.Path, c.Args, "&")
+	klog.V(1).Info(c.Path, c.Args, "&")
 	return c.Cmd.Start()
 }
 
@@ -276,9 +227,9 @@ func (c *Cmd) Wait() error {
 		}
 	}()
 
-	log.Println("waiting", c.Path, c.Args)
+	klog.V(1).Info("waiting", c.Path, c.Args)
 	err := c.Cmd.Wait()
-	log.Println("exited", c.Path, c.Args)
+	klog.V(1).Info("exited", c.Path, c.Args)
 	if err != nil {
 		return err
 	}
@@ -295,78 +246,6 @@ func (c *Cmd) Wait() error {
 // Kill implements Commander
 func (c *Cmd) Kill() error {
 	return c.Cmd.Process.Kill()
-}
-
-// A Pipeline is two or more processes, run in parallel, which feed the stdout of each process to the next process's stdin like a standard shell pipe
-type Pipeline struct {
-	// Cmds are the commands to run, in order
-	Cmds []*Cmd
-	// InPipes are the read side of the pipes
-	InPipes []*os.File
-	// OutPipes are the write side of the pipes
-	OutPipes []*os.File
-}
-
-var (
-	_ = Commander(&Pipeline{})
-)
-
-// NewPipeline creates a new pipeline
-func NewPipeline(cmd ...*Cmd) (*Pipeline, error) {
-	if len(cmd) < 2 {
-		return nil, fmt.Errorf("Need at least two commands for a pipeline")
-	}
-	prevCmd := cmd[0]
-	inPipes := make([]*os.File, 0, len(cmd)-1)
-	outPipes := make([]*os.File, 0, len(cmd)-1)
-	for _, nextCmd := range cmd[1:] {
-		// TODO: Does this need to get cleaned up somehow?
-		reader, writer, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		inPipes = append(inPipes, reader)
-		outPipes = append(outPipes, writer)
-		nextCmd.Stdin = reader
-		prevCmd.Stdout = writer
-	}
-	return &Pipeline{Cmds: cmd, InPipes: inPipes, OutPipes: outPipes}, nil
-}
-
-// ForwardErr forwrds the stderr of all commands in the pipeline to the current process
-func (p *Pipeline) ForwardErr() *Pipeline {
-	for _, cmd := range p.Cmds {
-		cmd.ForwardErr()
-	}
-	return p
-}
-
-// Run implements Commander
-func (p *Pipeline) Run() error {
-	err := p.Start()
-	if err != nil {
-		return err
-	}
-	err = p.Wait()
-	log.Println("pipeline finished")
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// Start implements Commander
-func (p *Pipeline) Start() error {
-	for ix, cmd := range p.Cmds {
-		err := cmd.Start()
-		if err != nil {
-			for ix2 := 0; ix2 < ix; ix2++ {
-				p.Cmds[ix2].Process.Kill()
-			}
-			return err
-		}
-	}
-	return nil
 }
 
 type ixerr struct {
@@ -672,4 +551,125 @@ func (t *Then) Kill() error {
 
 func (t *Then) Wait() error {
 	return <-t.result
+}
+
+// FanOut runs multiple process-like tasks with a maximum number of concurrent tasks, like the shell & operator
+func FanOut(parallelCount int, cmds ...Commander) error {
+	klog.V(1).Info(parallelCount, len(cmds))
+	cmdChan := make(chan Commander)
+	errChan := make(chan error)
+	sem := make(chan struct{})
+	go func() {
+		for _, cmd := range cmds {
+			cmdChan <- cmd
+		}
+		close(cmdChan)
+		klog.V(1).Info("all commands pushed")
+	}()
+	for ix := 0; ix < parallelCount; ix++ {
+		go func() {
+			klog.V(1).Info("fanout started")
+			defer func() {
+				sem <- struct{}{}
+				klog.V(1).Info("sem++")
+				klog.V(1).Info("fanout finished")
+			}()
+			for cmd := range cmdChan {
+				errChan <- cmd.Run()
+				klog.V(1).Info("Wrote err")
+			}
+		}()
+	}
+	go func() {
+		for ix := 0; ix < parallelCount; ix++ {
+			_ = <-sem
+			klog.V(1).Info("sem--")
+		}
+		klog.V(1).Info("all fanouts finished")
+		close(errChan)
+	}()
+	errs := make([]error, 0, len(cmds))
+	for err := range errChan {
+		klog.V(1).Info("Read err")
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	klog.V(1).Info("all errors recorded")
+	if len(errs) != 0 {
+		return &MultiProcessError{Errors: errs}
+	}
+	return nil
+}
+
+// A Pipeline is two or more processes, run in parallel, which feed the stdout of each process to the next process's stdin like a standard shell pipe
+type Pipeline struct {
+	// Cmds are the commands to run, in order
+	Cmds []*Cmd
+	// InPipes are the read side of the pipes
+	InPipes []*os.File
+	// OutPipes are the write side of the pipes
+	OutPipes []*os.File
+}
+
+var (
+	_ = Commander(&Pipeline{})
+)
+
+// NewPipeline creates a new pipeline
+func NewPipeline(cmd ...*Cmd) (*Pipeline, error) {
+	if len(cmd) < 2 {
+		return nil, fmt.Errorf("Need at least two commands for a pipeline")
+	}
+	prevCmd := cmd[0]
+	inPipes := make([]*os.File, 0, len(cmd)-1)
+	outPipes := make([]*os.File, 0, len(cmd)-1)
+	for _, nextCmd := range cmd[1:] {
+		// TODO: Does this need to get cleaned up somehow?
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		inPipes = append(inPipes, reader)
+		outPipes = append(outPipes, writer)
+		nextCmd.Stdin = reader
+		prevCmd.Stdout = writer
+	}
+	return &Pipeline{Cmds: cmd, InPipes: inPipes, OutPipes: outPipes}, nil
+}
+
+// ForwardErr forwrds the stderr of all commands in the pipeline to the current process
+func (p *Pipeline) ForwardErr() *Pipeline {
+	for _, cmd := range p.Cmds {
+		cmd.ForwardErr()
+	}
+	return p
+}
+
+// Run implements Commander
+func (p *Pipeline) Run() error {
+	err := p.Start()
+	if err != nil {
+		return err
+	}
+	err = p.Wait()
+	klog.V(1).Info("pipeline finished")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Start implements Commander
+func (p *Pipeline) Start() error {
+	for ix, cmd := range p.Cmds {
+		err := cmd.Start()
+		if err != nil {
+			for ix2 := 0; ix2 < ix; ix2++ {
+				p.Cmds[ix2].Process.Kill()
+			}
+			return err
+		}
+	}
+	return nil
 }
