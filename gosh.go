@@ -52,6 +52,8 @@ type Cmd struct {
 	HandleStdoutErr chan error
 	// Closers is a set of things that should be closed after the Cmd finishes
 	Closers []io.Closer
+	// BuilderError is set if a builder method like FileOut fails. Run() and Start() will return this error if set. Further builder methods will do nothing if this is set.
+	BuilderError error
 }
 
 var (
@@ -65,6 +67,9 @@ func Command(ctx context.Context, cmd string, args ...string) *Cmd {
 
 // ForwardAll forwards stdin/out/err to/from the current process from/to this Cmd
 func (c *Cmd) ForwardAll() *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -73,6 +78,9 @@ func (c *Cmd) ForwardAll() *Cmd {
 
 // ForwardOutErr forwards stdout/err to the current process from this Cmd
 func (c *Cmd) ForwardOutErr() *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c
@@ -80,12 +88,18 @@ func (c *Cmd) ForwardOutErr() *Cmd {
 
 // ForwardErr forward stderr to the current process from this Cmd
 func (c *Cmd) ForwardErr() *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.Stderr = os.Stderr
 	return c
 }
 
-// ProcessOut sets a function to feed the stdout of this Cmd into
+// ProcessOut sets a function to feed the stdout of this Cmd into. You can think of this as piping this Cmd's stdout back into your program. If this processing function fails, it will be returned from Run() or Wait() as if it were another process in a pipeline.
 func (c *Cmd) ProcessOut(handler PipeProcessor) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.HandleStdout = handler
 	c.HandleStdoutErr = make(chan error)
 	return c
@@ -93,45 +107,63 @@ func (c *Cmd) ProcessOut(handler PipeProcessor) *Cmd {
 
 // StringIn sets a literal string to be provided as stdin to this Cmd
 func (c *Cmd) StringIn(in string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.Stdin = strings.NewReader(in)
 	return c
 }
 
 // FileIn sets the path of a file whose contents are to be to redirected to this Cmd's stdin
-func (c *Cmd) FileIn(path string) error {
+func (c *Cmd) FileIn(path string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		c.BuilderError = err
+		return c
 	}
 	c.Cmd.Stdin = f
 	c.Closers = append(c.Closers, f)
-	return nil
+	return c
 }
 
 // FileOut sets the path of a file to redirect this Cmd's stdout to
-func (c *Cmd) FileOut(path string) error {
+func (c *Cmd) FileOut(path string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	f, err := os.Create(path)
 	if err != nil {
-		return err
+		c.BuilderError = err
+		return c
 	}
 	c.Cmd.Stdout = f
 	c.Closers = append(c.Closers, f)
-	return nil
+	return c
 }
 
 // FileOut sets the path of a file to redirect this Cmd's stderr to
-func (c *Cmd) FileErr(path string) error {
+func (c *Cmd) FileErr(path string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	f, err := os.Create(path)
 	if err != nil {
-		return err
+		c.BuilderError = err
+		return c
 	}
 	c.Cmd.Stderr = f
 	c.Closers = append(c.Closers, f)
-	return nil
+	return c
 }
 
 // WithParentEnv copies the current process's environment variables to this Cmd
 func (c *Cmd) WithParentEnv() *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	c.Env = make([]string, len(os.Environ()))
 	copy(c.Env, os.Environ())
 	return c
@@ -139,14 +171,17 @@ func (c *Cmd) WithParentEnv() *Cmd {
 
 // WithEnv sets one or more environment variables for this Cmd. Note that if you do not call WithParentEnv() first, the current process's variables will not be passed.
 func (c *Cmd) WithEnv(env map[string]string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	envIndex := make(map[string]int, len(c.Cmd.Env))
 	for ix, envLine := range c.Cmd.Env {
 		split := strings.SplitN(envLine, "=", 2)
-		envIndex[split[0]] = ix
+		envIndex[strings.ToLower(split[0])] = ix
 	}
 	for k, v := range env {
 		line := fmt.Sprintf("%s=%s", k, v)
-		ix, exists := envIndex[k]
+		ix, exists := envIndex[strings.ToLower(k)]
 		if exists {
 			c.Cmd.Env[ix] = line
 		} else {
@@ -158,37 +193,45 @@ func (c *Cmd) WithEnv(env map[string]string) *Cmd {
 
 // WithParentEnvAnd is a convienence wrapper for WithParentEnv() then WithEnv()
 func (c *Cmd) WithParentEnvAnd(env map[string]string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	return c.WithParentEnv().WithEnv(env)
 }
 
 func (c *Cmd) startStdoutProcessor() error {
-	if c.HandleStdout != nil {
-		stdout, err := c.Cmd.StdoutPipe()
-		if err != nil {
-			return err
-		}
-		go func() {
-			defer func() {
-				r := recover()
-				if r == nil {
-					return
-				}
-				err, ok := r.(error)
-				if ok {
-					c.HandleStdoutErr <- err
-				} else {
-					c.HandleStdoutErr <- fmt.Errorf("panicked: %#v", r)
-				}
-				close(c.HandleStdoutErr)
-			}()
-			c.HandleStdoutErr <- c.HandleStdout(stdout)
-		}()
+	if c.HandleStdout == nil {
+		return nil
 	}
+	stdout, err := c.Cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer func() {
+			defer close(c.HandleStdoutErr)
+			r := recover()
+			if r == nil {
+				return
+			}
+			err, ok := r.(error)
+			if ok {
+				c.HandleStdoutErr <- err
+			} else {
+				c.HandleStdoutErr <- fmt.Errorf("panicked: %#v", r)
+			}
+		}()
+		err := c.HandleStdout(stdout)
+		c.HandleStdoutErr <- err
+	}()
 	return nil
 }
 
 // Run implements Commander
 func (c *Cmd) Run() error {
+	if c.BuilderError != nil {
+		return c.BuilderError
+	}
 	defer func() {
 		for _, closer := range c.Closers {
 			closer.Close()
@@ -216,6 +259,9 @@ func (c *Cmd) Run() error {
 
 // Start implements Commander
 func (c *Cmd) Start() error {
+	if c.BuilderError != nil {
+		return c.BuilderError
+	}
 	err := c.startStdoutProcessor()
 	if err != nil {
 		return err
