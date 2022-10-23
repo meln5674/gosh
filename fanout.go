@@ -12,6 +12,7 @@ type FanOutCmd struct {
 	sem            chan struct{}
 	errChan        chan error
 	kill           chan struct{}
+	mutex          chan struct{}
 	BuilderError   error
 }
 
@@ -58,40 +59,61 @@ func (f *FanOutCmd) Start() error {
 	cmdChan := make(chan Commander)
 	f.errChan = make(chan error)
 	f.sem = make(chan struct{})
+	f.kill = make(chan struct{}, 1)
+	f.mutex = make(chan struct{}, 1)
 	go func() {
 		for _, cmd := range f.Cmds {
 			cmdChan <- cmd
 		}
 		close(cmdChan)
-		klog.V(0).Info("all commands pushed")
+		klog.V(11).Info("all commands pushed")
 	}()
 	for ix := 0; ix < f.MaxConcurrency; ix++ {
 		go func() {
-			klog.V(0).Info("fanout started")
+			klog.V(11).Info("fanout started")
 			defer func() {
 				f.sem <- struct{}{}
-				klog.V(0).Info("sem++")
-				klog.V(0).Info("fanout finished")
+				klog.V(11).Info("sem++")
+				klog.V(11).Info("fanout finished")
 			}()
-			for {
-				select {
-				case cmd := <-cmdChan:
-					f.errChan <- cmd.Run()
-					klog.V(0).Info("Wrote err")
-				case _ = <-f.kill:
-					klog.V(0).Info("Got kill signal, emptying cmdChan")
-					for range cmdChan {
+			killed := false
+			for !killed {
+				func() {
+					var cmd Commander
+					var ok bool
+
+					func() {
+						f.mutex <- struct{}{}
+						defer func() { _ = <-f.mutex }()
+						select {
+						case cmd, ok = <-cmdChan:
+							if !ok {
+								killed = true
+								return
+							}
+							klog.V(11).Info("Wrote err")
+						case _ = <-f.kill:
+							klog.V(11).Info("Got kill signal, emptying cmdChan")
+							for range cmdChan {
+							}
+							killed = true
+							return
+						}
+					}()
+					if killed {
+						return
 					}
-				}
+					f.errChan <- cmd.Run()
+				}()
 			}
 		}()
 	}
 	go func() {
 		for ix := 0; ix < f.MaxConcurrency; ix++ {
 			_ = <-f.sem
-			klog.V(0).Info("sem--")
+			klog.V(11).Info("sem--")
 		}
-		klog.V(0).Info("all fanouts finished")
+		klog.V(11).Info("all fanouts finished")
 		close(f.errChan)
 	}()
 	return nil
@@ -101,12 +123,12 @@ func (f *FanOutCmd) Start() error {
 func (f *FanOutCmd) Wait() error {
 	errs := make([]error, 0, len(f.Cmds))
 	for err := range f.errChan {
-		klog.V(0).Info("Read err")
+		klog.V(11).Info("Read err")
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	klog.V(0).Info("all errors recorded")
+	klog.V(11).Info("all errors recorded")
 	if len(errs) != 0 {
 		return &MultiProcessError{Errors: errs}
 	}
@@ -117,12 +139,16 @@ func (f *FanOutCmd) Wait() error {
 func (f *FanOutCmd) Kill() error {
 	f.kill <- struct{}{}
 	errs := make([]error, 0, len(f.Cmds))
-	for _, cmd := range f.Cmds {
-		err := cmd.Kill()
-		if err != nil {
-			errs = append(errs, err)
+	func() {
+		f.mutex <- struct{}{}
+		defer func() { _ = <-f.mutex }()
+		for _, cmd := range f.Cmds {
+			err := cmd.Kill()
+			if err != nil && !errors.Is(err, ErrNotStarted) {
+				errs = append(errs, err)
+			}
 		}
-	}
+	}()
 	if len(errs) != 0 {
 		return &MultiProcessError{Errors: errs}
 	}

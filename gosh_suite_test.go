@@ -288,6 +288,22 @@ func quoteShell(s string) string {
 	return fmt.Sprintf("'%s'", strings.ReplaceAll(s, "'", `'\''`))
 }
 
+func makeSentinel(dir, name string) string {
+	return fmt.Sprintf(`touch '%s/%s'`, dir, name)
+}
+
+func waitForSentinels(dir string, names ...string) string {
+	builder := strings.Builder{}
+	builder.WriteString("while ")
+	builder.WriteString(fmt.Sprintf(`! [ -f %s ]`, quoteShell(fmt.Sprintf(`%s/%s`, dir, names[0]))))
+	for _, name := range names[1:] {
+		builder.WriteString(" || ")
+		builder.WriteString(fmt.Sprintf(`! [ -f %s ]`, quoteShell(fmt.Sprintf(`%s/%s`, dir, name))))
+	}
+	builder.WriteString("; do sleep 1; done")
+	return builder.String()
+}
+
 func checkStdin(s string) string {
 	return fmt.Sprintf(`[ "$(cat)" == %s ]`, quoteShell(s))
 }

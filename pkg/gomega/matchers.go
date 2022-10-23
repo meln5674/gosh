@@ -74,7 +74,7 @@ func (m *MultiProcessErrorMatcher) FailureMessage(actual interface{}) (message s
 	}
 
 	return fmt.Sprintf(
-		"Expected\n%sto be somewhere within the tree of\n%s",
+		"Expected\n%s\nto be somewhere within the tree of\n%s",
 		gformat.Object(m.Expected, 1),
 		gformat.Object(actual, 1),
 	)
@@ -97,7 +97,7 @@ func (m *MultiProcessErrorMatcher) NegatedFailureMessage(actual interface{}) (me
 	}
 
 	return fmt.Sprintf(
-		"Expected\n%sto be nowhere within the tree of\n%s",
+		"Expected\n%s\nto be nowhere within the tree of\n%s",
 		gformat.Object(m.Expected, 1),
 		gformat.Object(actual, 1),
 	)
@@ -178,7 +178,7 @@ func (m *MultiProcessErrorTypeMatcher) FailureMessage(actual interface{}) (messa
 	}
 
 	return fmt.Sprintf(
-		"Expected\n%sto be somewhere within the tree of\n%s",
+		"Expected\n%s\nto be somewhere within the tree of\n%s",
 		gformat.Object(m.Expected, 1),
 		gformat.Object(actual, 1),
 	)
@@ -201,7 +201,7 @@ func (m *MultiProcessErrorTypeMatcher) NegatedFailureMessage(actual interface{})
 	}
 
 	return fmt.Sprintf(
-		"Expected\n%sto be nowhere within the tree of\n%s",
+		"Expected\n%s\nto be nowhere within the tree of\n%s",
 		gformat.Object(m.Expected, 1),
 		gformat.Object(actual, 1),
 	)

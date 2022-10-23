@@ -3,7 +3,6 @@ package gosh
 import (
 	"fmt"
 	"io"
-	"k8s.io/klog/v2"
 	"os"
 )
 
@@ -69,7 +68,6 @@ func (p *PipelineCmd) Run() error {
 		return err
 	}
 	err = p.Wait()
-	klog.V(0).Info("pipeline finished")
 	if err != nil {
 		return err
 	}
