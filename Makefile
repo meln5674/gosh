@@ -10,7 +10,7 @@ ginkgo:
 bin:
 	mkdir -p bin
 
-bin/coverage.out: bin ginkgo gosh.go gosh_test.go gosh_suite_test.go
+bin/coverage.out: bin ginkgo gosh.go $(wildcard *_test.go)
 	go test -v -coverprofile=bin/coverage.out ./
 
 bin/coverage.html: bin/coverage.out
