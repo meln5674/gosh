@@ -1,7 +1,6 @@
 package gosh
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -338,18 +337,18 @@ func FuncErr(handler PipeSink) StreamSetter {
 	}
 }
 
-// StringIn sets a literal string to be provided as stdin to this Cmd
+// StringIn sets a literal string to be provided as stdin to this Cmd.
 func StringIn(in string) StreamSetter {
-	return func(p Pipelineable) error {
-		return p.SetStdin(strings.NewReader(in))
-	}
+	return BytesIn([]byte(in))
 }
 
-// BytesIn sets a literal byte slice to be provided as stdin to this Cmd
+// BytesIn sets a literal byte slice to be provided as stdin to this Cmd.
 func BytesIn(in []byte) StreamSetter {
-	return func(p Pipelineable) error {
-		return p.SetStdin(bytes.NewBuffer(in))
-	}
+	return FuncIn(func(w io.Writer) error {
+
+		_, err := w.Write(in)
+		return err
+	})
 }
 
 // FileIn sets the path of a file whose contents are to be to redirected to this Cmd's stdin. The file is not opened when FileIn is called, but instead when Run() or Start() is called.
@@ -470,8 +469,8 @@ func (c *Cmd) WithParentEnvAnd(env map[string]string) *Cmd {
 	return c.WithParentEnv().WithEnv(env)
 }
 
-func (c *Cmd) doDeferredBefore() error {
-	for _, f := range c.deferredBefore {
+func doDeferredBefore(deferredBefore []func() error) error {
+	for _, f := range deferredBefore {
 		err := f()
 		if err != nil {
 			return err
@@ -480,13 +479,13 @@ func (c *Cmd) doDeferredBefore() error {
 	return nil
 }
 
-func (c *Cmd) doDeferredAfter(retErr *error) {
+func doDeferredAfter(retErr *error, deferredAfter []func() error) {
 	origErr := *retErr
-	errs := make([]error, 0, len(c.deferredAfter))
+	errs := make([]error, 0, len(deferredAfter))
 	if origErr != nil {
 		errs = append(errs, origErr)
 	}
-	for _, f := range c.deferredAfter {
+	for _, f := range deferredAfter {
 		err := f()
 		if err != nil {
 			errs = append(errs, err)
@@ -502,14 +501,14 @@ func (c *Cmd) Run() (err error) {
 	if c.BuilderError != nil {
 		return c.BuilderError
 	}
-	defer c.doDeferredAfter(&err)
-	err = c.doDeferredBefore()
+	defer doDeferredAfter(&err, c.deferredAfter)
+	err = doDeferredBefore(c.deferredBefore)
 	if err != nil {
 		return err
 	}
-	klog.V(0).Info(c.Path, c.Args)
+	klog.V(0).Infof("%s %v", c.Path, c.Args)
 	err = c.Cmd.Run()
-	klog.V(0).Info("exited", c.Path, c.Args)
+	klog.V(0).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
 		return
 	}
@@ -521,23 +520,23 @@ func (c *Cmd) Start() error {
 	if c.BuilderError != nil {
 		return c.BuilderError
 	}
-	err := c.doDeferredBefore()
+	err := doDeferredBefore(c.deferredBefore)
 	if err != nil {
 		return err
 	}
 	if err != nil {
 		return err
 	}
-	klog.V(0).Info(c.Path, c.Args, "&")
+	klog.V(0).Infof("%s %v &", c.Path, c.Args)
 	return c.Cmd.Start()
 }
 
 // Wait implements Commander
 func (c *Cmd) Wait() (err error) {
-	defer c.doDeferredAfter(&err)
-	klog.V(0).Info("waiting", c.Path, c.Args)
+	defer doDeferredAfter(&err, c.deferredAfter)
+	klog.V(0).Info("waiting: %s %v", c.Path, c.Args)
 	err = c.Cmd.Wait()
-	klog.V(0).Info("exited", c.Path, c.Args)
+	klog.V(0).Info("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
 		return
 	}
@@ -659,26 +658,113 @@ type sequenceEvent struct {
 	next *int
 }
 
-// An AndCmd runs a sequence of tasks, stopping at the first failure, like the shell && operator
-type AndCmd struct {
-	// Cmds are the tasks to run
-	Cmds   []Commander
-	kill   chan struct{}
-	result chan error
-}
+// A SequenceGate indicates to a Sequence what to do when a command finishes, and has a chance to modify the final error
+type SequenceGate func(s *SequenceCmd, ix int, err error, killed bool) (continue_ bool, finalErr error)
 
-func And(cmds ...Commander) *AndCmd {
-	return &AndCmd{Cmds: cmds}
+// A SequenceCmd executes commands in order, one at a time,
+// stopping when either there are no more or a gate function indicates to stop early.
+// Kill() will stop a SequenceCmd regardless of the output of the gate function, but the gate function can still mutate the final error.
+type SequenceCmd struct {
+	Cmds []Commander
+	Gate SequenceGate
+	// CmdErrors records the errors returned by the corresponding Cmd's since a SequenceCmd does not necessarily stop when a command fails
+	CmdErrors      []error
+	BuilderError   error
+	kill           chan struct{}
+	result         chan error
+	deferredBefore []func() error
+	deferredAfter  []func() error
 }
 
 var (
-	_ = Commander(&AndCmd{})
+	_ = Pipelineable(&SequenceCmd{})
 )
 
-// Run implements Commander
-func (a *AndCmd) Run() error {
-	for _, cmd := range a.Cmds {
-		err := cmd.Run()
+func Sequence(gate SequenceGate, cmds ...Commander) *SequenceCmd {
+	return &SequenceCmd{Gate: gate, Cmds: cmds, CmdErrors: make([]error, 0, len(cmds))}
+}
+
+func (s *SequenceCmd) Run() error {
+	if s.BuilderError != nil {
+		return s.BuilderError
+	}
+
+	var err error
+	var continue_ bool
+	defer doDeferredAfter(&err, s.deferredAfter)
+	err = doDeferredBefore(s.deferredBefore)
+	if err != nil {
+		return err
+	}
+	for ix, cmd := range s.Cmds {
+		err = cmd.Run()
+		if err != nil {
+			s.CmdErrors = append(s.CmdErrors, err)
+		}
+		continue_, err = s.Gate(s, ix, err, false)
+		if !continue_ {
+			break
+		}
+	}
+	return err
+
+}
+
+func (s *SequenceCmd) Start() error {
+	if s.BuilderError != nil {
+		return s.BuilderError
+	}
+
+	err := doDeferredBefore(s.deferredBefore)
+	if err != nil {
+		return err
+	}
+	s.kill = make(chan struct{})
+	s.result = make(chan error)
+	go func() {
+		var err error
+		var continue_ bool
+	loop:
+		for ix, cmd := range s.Cmds {
+			select {
+			case _ = <-s.kill:
+				err = ErrorKilled
+				_, err = s.Gate(s, ix, err, true)
+				break loop
+			default:
+				err = cmd.Run()
+				if err != nil {
+					s.CmdErrors = append(s.CmdErrors, err)
+				}
+				continue_, err = s.Gate(s, ix, err, false)
+				if !continue_ {
+					break loop
+				}
+			}
+		}
+		s.result <- err
+	}()
+	return nil
+}
+
+func (s *SequenceCmd) Kill() error {
+	s.kill <- struct{}{}
+	return nil
+}
+
+func (s *SequenceCmd) Wait() (err error) {
+	defer doDeferredAfter(&err, s.deferredAfter)
+	err = <-s.result
+	return
+}
+
+func (s *SequenceCmd) SetStdin(r io.Reader) error {
+	for _, cmd := range s.Cmds {
+		p, ok := cmd.(Pipelineable)
+		if !ok {
+			continue
+		}
+		err := p.SetStdin(r)
 		if err != nil {
 			return err
 		}
@@ -686,183 +772,105 @@ func (a *AndCmd) Run() error {
 	return nil
 }
 
-func (a *AndCmd) Start() error {
-	a.kill = make(chan struct{})
-	a.result = make(chan error)
-	go func() {
-		var err error
-		for _, cmd := range a.Cmds {
-			select {
-			case _ = <-a.kill:
-				err = ErrorKilled
-				break
-			default:
-				err = cmd.Run()
-				if err != nil {
-					break
-				}
-			}
-		}
-		a.result <- err
-	}()
-	return nil
-}
-
-func (a *AndCmd) Kill() error {
-	a.kill <- struct{}{}
-	return nil
-}
-
-func (a *AndCmd) Wait() error {
-	return <-a.result
-}
-
-// An OrCmd runs a sequence of tasks, stopping at the first success, like the shell || operator. If any command succeeds, the OrCmd succeeds. If all commands fail, the OrCmd fails with the final error.
-type OrCmd struct {
-	// Cmds are the tasks to run
-	Cmds []Commander
-	// CmdErrors records the errors returned by the corresponding Cmd's since an OrCmd stops when a Cmd succeeds. Do not use between calling Start() and Wait(). All indexes are guarnteed not nil.
-	CmdErrors []error
-	kill      chan struct{}
-	result    chan error
-}
-
-var (
-	_ = Commander(&OrCmd{})
-)
-
-func Or(cmds ...Commander) *OrCmd {
-	return &OrCmd{Cmds: cmds}
-}
-
-// Run implements Commander
-func (o *OrCmd) Run() error {
-	var err error
-	for _, cmd := range o.Cmds {
-		err = cmd.Run()
-		if err == nil {
-			break
-		}
-		o.CmdErrors = append(o.CmdErrors, err)
-	}
-	return err
-}
-
-func recoverErr() error {
-	r := recover()
-	if r != nil {
-		err, ok := r.(error)
+func (s *SequenceCmd) SetStdout(w io.Writer) error {
+	for _, cmd := range s.Cmds {
+		p, ok := cmd.(Pipelineable)
 		if !ok {
-			err = fmt.Errorf("%#v", r)
+			continue
 		}
-		return err
+		err := p.SetStdout(w)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
-
 }
 
-func (o *OrCmd) Start() error {
-	o.result = make(chan error)
-	o.kill = make(chan struct{})
-	o.CmdErrors = make([]error, 0, len(o.Cmds))
-	go func() {
-		var err error
-		if len(o.Cmds) != 0 {
-			err = errors.New("Should not be seen")
+func (s *SequenceCmd) SetStderr(w io.Writer) error {
+	for _, cmd := range s.Cmds {
+		p, ok := cmd.(Pipelineable)
+		if !ok {
+			continue
 		}
-		for _, cmd := range o.Cmds {
-			select {
-			case _ = <-o.kill:
-				if err == nil {
-					err = ErrorKilled
+		err := p.SetStderr(w)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SequenceCmd) DeferBefore(f func() error) {
+	s.deferredBefore = append(s.deferredBefore, f)
+}
+
+func (s *SequenceCmd) DeferAfter(f func() error) {
+	s.deferredAfter = append(s.deferredAfter, f)
+}
+
+func (s *SequenceCmd) WithStreams(fs ...StreamSetter) *SequenceCmd {
+	if s.BuilderError != nil {
+		return s
+	}
+	for _, f := range fs {
+		err := f(s)
+		if err != nil {
+			s.BuilderError = err
+			return s
+		}
+	}
+	return s
+}
+
+func And(cmds ...Commander) *SequenceCmd {
+	return Sequence(
+		func(s *SequenceCmd, ix int, err error, killed bool) (continue_ bool, finalError error) {
+			if ix == len(s.Cmds)-1 {
+				errs := make([]error, 0, len(s.CmdErrors))
+				for _, cmdErr := range s.CmdErrors {
+					errs = append(errs, cmdErr)
 				}
-				break
-			default:
-				if err == nil {
-					break
-				}
-				err = cmd.Run()
-				if err != nil {
-					o.CmdErrors = append(o.CmdErrors, err)
+				if len(errs) != 0 {
+					return true, &MultiProcessError{Errors: errs}
 				}
 			}
-		}
-		o.result <- err
-	}()
-	return nil
-}
-
-func (o *OrCmd) Kill() error {
-	o.kill <- struct{}{}
-	return nil
-}
-
-func (o *OrCmd) Wait() error {
-	return <-o.result
-}
-
-// A ThenCmd runs a sequence of tasks, ignoring, but recording, any failures, like the shell ; operator
-type ThenCmd struct {
-	// Cmds are the tasks to run
-	Cmds []Commander
-	// CmdErrors records the errors returned by the corresponding Cmd's since a ThenCmd does not stop when an error is encountered. If the Cmd with the same index returned no error, the CmdError with the same index will be nil
-	CmdErrors []error
-	kill      chan struct{}
-	result    chan error
-}
-
-var (
-	_ = Commander(&ThenCmd{})
-)
-
-func Then(cmds ...Commander) *ThenCmd {
-	return &ThenCmd{Cmds: cmds}
-}
-
-// Run implements Commander. Run will only fail if the last command fails
-func (t *ThenCmd) Run() error {
-	t.CmdErrors = make([]error, 0, len(t.Cmds))
-	var err error
-	for _, cmd := range t.Cmds {
-		err = cmd.Run()
-		t.CmdErrors = append(t.CmdErrors, err)
-	}
-	return err
-}
-
-func (t *ThenCmd) Start() error {
-	t.kill = make(chan struct{})
-	t.result = make(chan error)
-	go func() {
-		var err error
-		for _, cmd := range t.Cmds {
-			select {
-			case _ = <-t.kill:
-				if err == nil {
-					err = ErrorKilled
-				}
-				break
-			default:
-				err = cmd.Run()
-
+			if err != nil {
+				return false, err
 			}
-		}
-		t.result <- err
-	}()
-	return nil
+			return true, err
+		},
+		cmds...,
+	)
 }
 
-func (t *ThenCmd) Kill() error {
-	// TODO: Should these be killed in reverse?
-	for _, cmd := range t.Cmds {
-		cmd.Kill()
-	}
-	// TODO: Should this return a MultiProcessError?
-	return nil
+func Or(cmds ...Commander) *SequenceCmd {
+	return Sequence(
+		func(s *SequenceCmd, ix int, err error, killed bool) (continue_ bool, finalError error) {
+			if ix == len(s.Cmds)-1 {
+				errs := make([]error, 0, len(s.CmdErrors))
+				for _, cmdErr := range s.CmdErrors {
+					errs = append(errs, cmdErr)
+				}
+				if len(errs) != 0 {
+					return true, &MultiProcessError{Errors: errs}
+				}
+			}
+			if err != nil {
+				return true, err
+			}
+			return false, err
+		},
+		cmds...,
+	)
 }
 
-func (t *ThenCmd) Wait() error {
-	return <-t.result
+func Then(cmds ...Commander) *SequenceCmd {
+	return Sequence(
+		func(s *SequenceCmd, ix int, err error, killed bool) (continue_ bool, finalError error) {
+			return true, err
+		},
+		cmds...,
+	)
 }
 
 // A FanOutCmd runs a set of commands in parallel, with some limit as to how many can run concurrently

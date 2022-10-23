@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -107,6 +108,11 @@ func mockStd() (stdin, stdout, stderr *bytes.Buffer, start, closeIn, closeOutErr
 	stdinDone := make(chan struct{})
 	stdinDoneACK := make(chan struct{})
 
+	stdoutDoneACK := make(chan struct{})
+	stderrDoneACK := make(chan struct{})
+	inClosed := false
+	outErrClosed := false
+
 	start = func() {
 		go func() {
 			defer GinkgoRecover()
@@ -125,20 +131,38 @@ func mockStd() (stdin, stdout, stderr *bytes.Buffer, start, closeIn, closeOutErr
 		go func() {
 			defer GinkgoRecover()
 			io.Copy(stdout, stdoutRead)
+			stdoutDoneACK <- struct{}{}
 		}()
 		go func() {
 			defer GinkgoRecover()
 			io.Copy(stderr, stderrRead)
+			stderrDoneACK <- struct{}{}
 		}()
 	}
 	closeIn = func() {
+		if inClosed {
+			return
+		}
+		inClosed = true
 		stdinDone <- struct{}{}
 		_ = <-stdinDoneACK
 		stdinWrite.Close()
 	}
 	closeOutErr = func() {
+		if outErrClosed {
+			return
+		}
+		outErrClosed = true
 		stdoutWrite.Close()
 		stderrWrite.Close()
+		for ix := 0; ix < 2; ix++ {
+			select {
+			case _ = <-stdoutDoneACK:
+				break
+			case _ = <-stderrDoneACK:
+				break
+			}
+		}
 	}
 	os.Stdin = stdinRead
 	os.Stdout = stdoutWrite
@@ -205,65 +229,53 @@ func useMocks() {
 	AfterEach(popMock)
 }
 
-func genericSyncTest(cmd gosh.Commander, expectedStdin, expectedStdout, expectedStderr string) {
+type genericTestArgs struct {
+	cmd          gosh.Commander
+	stdin        string
+	stdout       string
+	stderr       string
+	ignoreStdin  bool
+	ignoreStdout bool
+	ignoreStderr bool
+	err          error
+	errOnStart   bool
+	async        bool
+}
+
+func genericTest(args genericTestArgs) {
 	func() {
 		startMocks()
 		defer stopMockOutErr()
-		_, err := mockStdin.WriteString(expectedStdin)
+		if !args.ignoreStdin {
+			_, err := mockStdin.WriteString(args.stdin)
+			Expect(err).ToNot(HaveOccurred(), "Failed to write mock standard input")
+		}
 		stopMockIn()
-		Expect(err).ToNot(HaveOccurred(), "Failed to write mock standard input")
-		Expect(cmd.Run()).To(Succeed(), "Command did not succeed")
+		if args.async {
+			if args.err == nil {
+				Expect(args.cmd.Start()).To(Succeed(), "Command did not start")
+				Expect(args.cmd.Wait()).To(Succeed(), "Command did not succeed")
+			} else if args.errOnStart {
+				Expect(args.cmd.Start()).To(MatchMultiProcessErrorType(args.err), "Did not fail in expected way")
+			} else {
+				Expect(args.cmd.Start()).To(Succeed(), "Command did not start")
+				Expect(args.cmd.Wait()).To(MatchMultiProcessErrorType(args.err), "Did not fail in expected way")
+			}
+		} else if args.err == nil {
+			Expect(args.cmd.Run()).To(Succeed(), "Command did not succeed")
+		} else {
+			Expect(args.cmd.Run()).To(MatchMultiProcessErrorType(args.err), "Did not fail in expected way")
+		}
 	}()
-	if len(expectedStdin) != 0 {
+	if !args.ignoreStdin {
 		Expect(mockStdin.String()).To(HaveLen(0), "Standard input was not consumed")
 	}
-	Expect(mockStdout.String()).To(Equal(expectedStdout), "Standard output did not match")
-	Expect(mockStderr.String()).To(Equal(expectedStderr), "Standard error did not match")
-}
-
-func genericAsyncTest(cmd gosh.Commander, expectedStdin, expectedStdout, expectedStderr string) {
-	func() {
-		startMocks()
-		defer stopMockOutErr()
-		_, err := mockStdin.WriteString(expectedStdin)
-		stopMockIn()
-		Expect(err).ToNot(HaveOccurred(), "Failed to write mock standard input")
-		Expect(cmd.Start()).To(Succeed(), "Command did not start")
-		Expect(cmd.Wait()).To(Succeed(), "Command did not succeed")
-	}()
-	if len(expectedStdin) != 0 {
-		Expect(mockStdin.String()).To(HaveLen(0), "Standard input was not consumed")
+	if !args.ignoreStdout {
+		Expect(mockStdout.String()).To(Equal(args.stdout), "Standard output did not match")
 	}
-	Expect(mockStdout.String()).To(Equal(expectedStdout), "Standard output did not match")
-	Expect(mockStderr.String()).To(Equal(expectedStderr), "Standard error did not match")
-}
-
-func genericSyncFailTest(cmd gosh.Commander, expectedErr error) {
-	startMocks()
-	stopMockIn()
-	defer stopMockOutErr()
-	err := cmd.Run()
-	Expect(err).To(HaveOccurred(), "Command did not fail")
-	Expect(err).To(MatchMultiProcessError(expectedErr), "Failed differently than expected")
-}
-
-func genericAsyncFailTest(cmd gosh.Commander, expectedErr error) {
-	startMocks()
-	stopMockIn()
-	defer stopMockOutErr()
-	Expect(cmd.Start()).To(Succeed(), "Command did not start")
-	err := cmd.Wait()
-	Expect(err).To(HaveOccurred(), "Command did not fail")
-	Expect(err).To(MatchMultiProcessError(expectedErr), "Failed differently than expected")
-}
-
-func genericAsyncFailStartTest(cmd gosh.Commander, expectedErr error) {
-	startMocks()
-	stopMockIn()
-	defer stopMockOutErr()
-	err := cmd.Start()
-	Expect(err).To(HaveOccurred(), "Command did not fail to start")
-	Expect(err).To(MatchMultiProcessError(expectedErr), "Failed differently than expected")
+	if !args.ignoreStderr {
+		Expect(mockStderr.String()).To(Equal(args.stderr), "Standard error did not match")
+	}
 }
 
 func quoteShell(s string) string {
@@ -272,6 +284,14 @@ func quoteShell(s string) string {
 
 func checkStdin(s string) string {
 	return fmt.Sprintf(`[ "$(cat)" == %s ]`, quoteShell(s))
+}
+
+func checkStdinLine(s string) string {
+	return fmt.Sprintf(`read && [ "${REPLY}" == %s ]`, quoteShell(s))
+}
+
+func checkStdinChar(c rune) string {
+	return fmt.Sprintf(`[ "$(go run util/readchar/main.go)" == %s ]`, quoteShell(string(c)))
 }
 
 func printStdout(s string) string {
@@ -284,6 +304,10 @@ func printStderr(s string) string {
 
 func inOutPassthrough() string {
 	return "cat"
+}
+
+func fail() string {
+	return "exit 1"
 }
 
 func allOf(s ...string) string {
@@ -317,47 +341,47 @@ var _ = Describe("Cmd", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					inOutPassthrough(),
 					printStderr("err"),
 				)).WithStreams(gosh.ForwardAll),
-				"in",
-				"in",
-				"err",
-			)
+				stdin:  "in",
+				stdout: "in",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in and err", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("This shouldn't be seen"),
 					printStderr("err"),
 				)).WithStreams(gosh.ForwardInErr),
-				"in",
-				"",
-				"err",
-			)
+				stdin:  "in",
+				stdout: "",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in and out", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.ForwardInOut),
-				"in",
-				"out",
-				"",
-			)
+				stdin:  "in",
+				stdout: "out",
+				stderr: "",
+			})
 		})
 	})
 
@@ -365,72 +389,72 @@ var _ = Describe("Cmd", func() {
 		useMocks()
 
 		It("should forward them but not in", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("out"),
 					printStderr("err"),
 				)).WithStreams(gosh.ForwardOutErr),
-				"This shouldn't be seen",
-				"out",
-				"err",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "out",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in", func() {
 		useMocks()
 
 		It("should forward it but not out or err", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.ForwardIn),
-				"in",
-				"",
-				"",
-			)
+				stdin:  "in",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Forwarding out", func() {
 		useMocks()
 
 		It("should forward it but not out or err", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.ForwardOut),
-				"This shouldn't be seen",
-				"out",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "out",
+				stderr: "",
+			})
 		})
 	})
 	When("Forwarding err", func() {
 		useMocks()
 
 		It("should forward it but not in or out", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("This shouldn't be seen"),
 					printStderr("err"),
 				)).WithStreams(gosh.ForwardErr),
-				"This shouldn't be seen",
-				"",
-				"err",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "err",
+			})
 		})
 	})
 	When("Processing in", func() {
 		useMocks()
 
 		It("should forward it", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("ininin"),
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
@@ -443,10 +467,10 @@ var _ = Describe("Cmd", func() {
 					}
 					return nil
 				})),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Processing in fails", func() {
@@ -454,14 +478,14 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Shell(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(
 					inOutPassthrough(),
 				).WithStreams(gosh.FuncIn(func(w io.Writer) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing in fails asynchronously", func() {
@@ -469,14 +493,14 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Shell(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(
 					inOutPassthrough(),
 				).WithStreams(gosh.FuncIn(func(w io.Writer) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 
@@ -485,15 +509,15 @@ var _ = Describe("Cmd", func() {
 
 		It("should forward them", func() {
 			var processedOut string
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.FuncOut(gosh.SaveString(&processedOut))),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 			Expect(processedOut).To(Equal("out"))
 		})
 	})
@@ -502,15 +526,15 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FuncOut(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing out fails asynchronously", func() {
@@ -518,15 +542,16 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FuncOut(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err:   err,
+				async: true,
+			})
 		})
 	})
 
@@ -535,15 +560,15 @@ var _ = Describe("Cmd", func() {
 
 		It("should forward them", func() {
 			var processedErr []byte
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStderr("err"),
 					printStdout("This shouldn't be seen"),
 				)).WithStreams(gosh.FuncErr(gosh.SaveBytes(&processedErr))),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 			Expect(string(processedErr)).To(Equal("err"))
 		})
 	})
@@ -552,15 +577,15 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FuncErr(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing err fails asynchronously", func() {
@@ -568,47 +593,48 @@ var _ = Describe("Cmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FuncErr(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err:   err,
+				async: true,
+			})
 		})
 	})
 	When("Using a string for in", func() {
 		useMocks()
 
 		It("should send it", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.StringIn("in")),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a bytes for in", func() {
 		useMocks()
 
 		It("should send it", func() {
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.BytesIn([]byte("in"))),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a file for in", func() {
@@ -620,38 +646,40 @@ var _ = Describe("Cmd", func() {
 			defer os.Remove(f.Name())
 			_, err = f.Write([]byte("in"))
 			Expect(err).ToNot(HaveOccurred())
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin("in"),
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FileIn(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a missing file for in", func() {
 		useMocks()
 
 		It("should fail", func() {
-			genericSyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FileIn("This file doesn't exist")),
-				os.ErrNotExist,
-			)
+				err: os.ErrNotExist,
+			})
 		})
 		It("should fail asynchronously", func() {
-			genericAsyncFailStartTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					printStdout("This shouldn't be seen"),
 					printStderr("Neither should this"),
 				)).WithStreams(gosh.FileIn("This file doesn't exist")),
-				os.ErrNotExist,
-			)
+				err:        os.ErrNotExist,
+				errOnStart: true,
+				async:      true,
+			})
 		})
 	})
 
@@ -662,16 +690,16 @@ var _ = Describe("Cmd", func() {
 			f, err := os.CreateTemp("", "*")
 			Expect(err).ToNot(HaveOccurred())
 			defer os.Remove(f.Name())
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.FileOut(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal("out"))
@@ -689,14 +717,14 @@ var _ = Describe("Cmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericSyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.FileOut(f.Name())),
-				os.ErrPermission,
-			)
+				err: os.ErrPermission,
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal(""))
@@ -714,14 +742,16 @@ var _ = Describe("Cmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericAsyncFailStartTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStdout("out"),
 					printStderr("This shouldn't be seen"),
 				)).WithStreams(gosh.FileOut(f.Name())),
-				os.ErrPermission,
-			)
+				err:        os.ErrPermission,
+				errOnStart: true,
+				async:      true,
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal(""))
@@ -735,16 +765,16 @@ var _ = Describe("Cmd", func() {
 			f, err := os.CreateTemp("", "*")
 			Expect(err).ToNot(HaveOccurred())
 			defer os.Remove(f.Name())
-			genericSyncTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStderr("err"),
 					printStdout("This shouldn't be seen"),
 				)).WithStreams(gosh.FileErr(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal("err"))
@@ -762,14 +792,14 @@ var _ = Describe("Cmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericSyncFailTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStderr("err"),
 					printStdout("This shouldn't be seen"),
 				)).WithStreams(gosh.FileErr(f.Name())),
-				os.ErrPermission,
-			)
+				err: os.ErrPermission,
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal(""))
@@ -787,14 +817,16 @@ var _ = Describe("Cmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericAsyncFailStartTest(
-				gosh.Shell(allOf(
+			genericTest(genericTestArgs{
+				cmd: gosh.Shell(allOf(
 					checkStdin(""),
 					printStderr("err"),
 					printStdout("This shouldn't be seen"),
 				)).WithStreams(gosh.FileErr(f.Name())),
-				os.ErrPermission,
-			)
+				err:        os.ErrPermission,
+				errOnStart: true,
+				async:      true,
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal(""))
@@ -884,26 +916,26 @@ var _ = Describe("PipelineCmd", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						inOutPassthrough(),
 						printStderr("err"),
 					)),
 					gosh.Shell(inOutPassthrough()),
 				).WithStreams(gosh.ForwardAll),
-				"in",
-				"in",
-				"err",
-			)
+				stdin:  "in",
+				stdout: "in",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in and err", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin("in"),
 						printStdout("This shouldn't be seen"),
@@ -913,18 +945,18 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("err"),
 					)),
 				).WithStreams(gosh.ForwardInErr),
-				"in",
-				"",
-				"err",
-			)
+				stdin:  "in",
+				stdout: "",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in and out", func() {
 		useMocks()
 
 		It("should forward them", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin("in"),
 						printStdout("out"),
@@ -935,10 +967,10 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.ForwardInOut),
-				"in",
-				"out",
-				"",
-			)
+				stdin:  "in",
+				stdout: "out",
+				stderr: "",
+			})
 		})
 	})
 
@@ -946,8 +978,8 @@ var _ = Describe("PipelineCmd", func() {
 		useMocks()
 
 		It("should forward them but not in", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin(""),
 						printStdout("out"),
@@ -955,18 +987,18 @@ var _ = Describe("PipelineCmd", func() {
 					)),
 					gosh.Shell(inOutPassthrough()),
 				).WithStreams(gosh.ForwardOutErr),
-				"This shouldn't be seen",
-				"out",
-				"err",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "out",
+				stderr: "err",
+			})
 		})
 	})
 	When("Forwarding in", func() {
 		useMocks()
 
 		It("should forward it but not out or err", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin("in"),
@@ -974,18 +1006,18 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.ForwardIn),
-				"in",
-				"",
-				"",
-			)
+				stdin:  "in",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Forwarding out", func() {
 		useMocks()
 
 		It("should forward it but not in or err", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin(""),
 						printStdout("This shouldn't be seen"),
@@ -997,18 +1029,18 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.ForwardOut),
-				"This shouldn't be seen",
-				"out",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "out",
+				stderr: "",
+			})
 		})
 	})
 	When("Forwarding err", func() {
 		useMocks()
 
 		It("should forward it but not in or out", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin(""),
 						printStdout("This shouldn't be seen"),
@@ -1018,18 +1050,18 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("err"),
 					)),
 				).WithStreams(gosh.ForwardErr),
-				"This shouldn't be seen",
-				"",
-				"err",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "err",
+			})
 		})
 	})
 	When("Processing in", func() {
 		useMocks()
 
 		It("should forward it", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin("ininin"),
@@ -1045,10 +1077,10 @@ var _ = Describe("PipelineCmd", func() {
 					}
 					return nil
 				})),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Processing in fails", func() {
@@ -1056,8 +1088,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(
 						inOutPassthrough(),
 					),
@@ -1067,8 +1099,8 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncIn(func(w io.Writer) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing in fails asynchronously", func() {
@@ -1076,8 +1108,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(
 						inOutPassthrough(),
@@ -1085,8 +1117,9 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncIn(func(w io.Writer) error {
 					return err
 				})),
-				err,
-			)
+				err:   err,
+				async: true,
+			})
 		})
 	})
 
@@ -1095,18 +1128,18 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should forward them", func() {
 			processedOut := "init"
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						printStdout("out"),
 						printStderr("This shouldn't be seen"),
 					)),
 					gosh.Shell(inOutPassthrough()),
 				).WithStreams(gosh.FuncOut(gosh.AppendString(&processedOut))),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 			Expect(processedOut).To(Equal("initout"))
 		})
 	})
@@ -1115,8 +1148,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
@@ -1125,8 +1158,8 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncOut(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing out fails asynchronously", func() {
@@ -1134,8 +1167,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
@@ -1144,8 +1177,8 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncOut(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 
@@ -1154,18 +1187,18 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should forward them", func() {
 			processedErr := []byte("init")
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStderr("err"),
 						printStdout("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FuncErr(gosh.AppendBytes(&processedErr))),
-				"This shouldn't be seen",
-				"",
-				"",
-			)
+				stdin:  "This shouldn't be seen",
+				stdout: "",
+				stderr: "",
+			})
 			Expect(string(processedErr)).To(Equal("initerr"))
 		})
 	})
@@ -1174,8 +1207,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
@@ -1184,8 +1217,8 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncErr(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err: err,
+			})
 		})
 	})
 	When("Processing err fails asynchronously", func() {
@@ -1193,8 +1226,8 @@ var _ = Describe("PipelineCmd", func() {
 
 		It("should return the error", func() {
 			err := errors.New("This is an error")
-			genericAsyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
@@ -1203,16 +1236,17 @@ var _ = Describe("PipelineCmd", func() {
 				).WithStreams(gosh.FuncErr(func(r io.Reader) error {
 					return err
 				})),
-				err,
-			)
+				err:   err,
+				async: true,
+			})
 		})
 	})
 	When("Using a string for in", func() {
 		useMocks()
 
 		It("should send it", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin("in"),
@@ -1220,18 +1254,18 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.StringIn("in")),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a bytes for in", func() {
 		useMocks()
 
 		It("should send it", func() {
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin("in"),
@@ -1239,10 +1273,10 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.BytesIn([]byte("in"))),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a file for in", func() {
@@ -1254,8 +1288,8 @@ var _ = Describe("PipelineCmd", func() {
 			defer os.Remove(f.Name())
 			_, err = f.Write([]byte("in"))
 			Expect(err).ToNot(HaveOccurred())
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin("in"),
@@ -1263,38 +1297,40 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.FileIn(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 		})
 	})
 	When("Using a missing file for in", func() {
 		useMocks()
 
 		It("should fail", func() {
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.FileIn("This file doesn't exist")),
-				os.ErrNotExist,
-			)
+				err: os.ErrNotExist,
+			})
 		})
 		It("should fail asynchronously", func() {
-			genericAsyncFailStartTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						printStdout("This shouldn't be seen"),
 						printStderr("Neither should this"),
 					)),
 				).WithStreams(gosh.FileIn("This file doesn't exist")),
-				os.ErrNotExist,
-			)
+				err:        os.ErrNotExist,
+				errOnStart: true,
+				async:      true,
+			})
 		})
 	})
 
@@ -1305,8 +1341,8 @@ var _ = Describe("PipelineCmd", func() {
 			f, err := os.CreateTemp("", "*")
 			Expect(err).ToNot(HaveOccurred())
 			defer os.Remove(f.Name())
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(allOf(
 						checkStdin(""),
 						printStdout("out"),
@@ -1316,10 +1352,10 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FileOut(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal("out"))
@@ -1337,8 +1373,8 @@ var _ = Describe("PipelineCmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin(""),
@@ -1347,8 +1383,8 @@ var _ = Describe("PipelineCmd", func() {
 					)),
 					gosh.Shell(inOutPassthrough()),
 				).WithStreams(gosh.FileOut(f.Name())),
-				os.ErrPermission,
-			)
+				err: os.ErrPermission,
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal(""))
@@ -1366,8 +1402,8 @@ var _ = Describe("PipelineCmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericAsyncFailStartTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin(""),
@@ -1375,8 +1411,10 @@ var _ = Describe("PipelineCmd", func() {
 						printStderr("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FileOut(f.Name())),
-				os.ErrPermission,
-			)
+				err:        os.ErrPermission,
+				errOnStart: true,
+				async:      true,
+			})
 			actualStdout, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStdout)).To(Equal(""))
@@ -1390,8 +1428,8 @@ var _ = Describe("PipelineCmd", func() {
 			f, err := os.CreateTemp("", "*")
 			Expect(err).ToNot(HaveOccurred())
 			defer os.Remove(f.Name())
-			genericSyncTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin(""),
@@ -1399,10 +1437,10 @@ var _ = Describe("PipelineCmd", func() {
 						printStdout("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FileErr(f.Name())),
-				"",
-				"",
-				"",
-			)
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal("err"))
@@ -1420,8 +1458,8 @@ var _ = Describe("PipelineCmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericSyncFailTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin(""),
@@ -1429,8 +1467,8 @@ var _ = Describe("PipelineCmd", func() {
 						printStdout("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FileErr(f.Name())),
-				os.ErrPermission,
-			)
+				err: os.ErrPermission,
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal(""))
@@ -1448,8 +1486,8 @@ var _ = Describe("PipelineCmd", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(f.Chmod(st.Mode() &^ 0222)).To(Succeed())
 
-			genericAsyncFailStartTest(
-				gosh.Pipeline(
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
 					gosh.Shell(inOutPassthrough()),
 					gosh.Shell(allOf(
 						checkStdin(""),
@@ -1457,12 +1495,294 @@ var _ = Describe("PipelineCmd", func() {
 						printStdout("This shouldn't be seen"),
 					)),
 				).WithStreams(gosh.FileErr(f.Name())),
-				os.ErrPermission,
-			)
+				err:        os.ErrPermission,
+				errOnStart: true,
+				async:      true,
+			})
 			actualStderr, err := ioutil.ReadFile(f.Name())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(actualStderr)).To(Equal(""))
 		})
 	})
 
+})
+
+var _ = Describe("And", func() {
+	When("Nothing fails", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				stdin:  "",
+				stdout: "123",
+				stderr: "",
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				async:  true,
+				stdin:  "",
+				stdout: "123",
+				stderr: "",
+			})
+		})
+	})
+	When("Something fails", func() {
+		useMocks()
+		It("should not run commands after it", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(fail()),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				stdin:  "",
+				stdout: "12",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+		})
+		It("should not run commands after it asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(fail()),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				async:  true,
+				stdin:  "",
+				stdout: "12",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+		})
+	})
+	When("Processing out", func() {
+		useMocks()
+		It("should work as expected", func() {
+			var processedOut []byte
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.FuncOut(gosh.SaveBytes(&processedOut))),
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+			Expect(string(processedOut)).To(Equal("123"))
+		})
+		It("should work as expected asynchronously", func() {
+			processedOut := []byte("init")
+			genericTest(genericTestArgs{
+				cmd: gosh.And(
+					gosh.Shell(printStdout("1")),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.FuncOut(gosh.AppendBytes(&processedOut))),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+			Expect(string(processedOut)).To(Equal("init123"))
+		})
+	})
+
+})
+
+var _ = Describe("Or", func() {
+	When("Everything fails", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(allOf(printStdout("2"), fail())),
+					gosh.Shell(allOf(printStdout("3"), fail())),
+				).WithStreams(gosh.ForwardOut),
+				stdin:  "",
+				stdout: "123",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(allOf(printStdout("2"), fail())),
+					gosh.Shell(allOf(printStdout("3"), fail())),
+				).WithStreams(gosh.ForwardOut),
+				async:  true,
+				stdin:  "",
+				stdout: "123",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+		})
+	})
+	When("Something succeeds", func() {
+		useMocks()
+		It("should not run commands after it", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				stdin:  "",
+				stdout: "12",
+				stderr: "",
+			})
+		})
+		It("should not run commands after it asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(printStdout("2")),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				async:  true,
+				stdin:  "",
+				stdout: "12",
+				stderr: "",
+			})
+		})
+	})
+	When("Processing err", func() {
+		useMocks()
+		It("should work as expected", func() {
+			var processedErr string
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.FuncErr(gosh.SaveString(&processedErr))),
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+			Expect(processedErr).To(Equal("123"))
+		})
+		It("should work as expected asynchronously", func() {
+			processedErr := "init"
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.FuncErr(gosh.AppendString(&processedErr))),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+				err:    &exec.ExitError{},
+			})
+			Expect(processedErr).To(Equal("init123"))
+		})
+	})
+})
+
+var _ = Describe("Then", func() {
+	When("Everything fails", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.ForwardErr),
+				stdin:  "",
+				stdout: "",
+				stderr: "123",
+				err:    &exec.ExitError{},
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.ForwardErr),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "123",
+				err:    &exec.ExitError{},
+			})
+		})
+	})
+	When("Everything succeeds", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(checkStdinLine("1")),
+					gosh.Shell(checkStdinLine("2")),
+					gosh.Shell(checkStdinLine("3")),
+				).WithStreams(gosh.ForwardIn),
+				stdin:  "1\n2\n3\n",
+				stdout: "",
+				stderr: "",
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(checkStdinLine("1")),
+					gosh.Shell(checkStdinLine("2")),
+					gosh.Shell(checkStdinLine("3")),
+				).WithStreams(gosh.ForwardIn),
+				async:  true,
+				stdin:  "1\n2\n3\n",
+				stdout: "",
+				stderr: "",
+			})
+		})
+	})
+	When("Using literal input", func() {
+		useMocks()
+		It("should work as expected", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(checkStdinChar('1')),
+					gosh.Shell(checkStdinChar('2')),
+					gosh.Shell(checkStdinChar('3')),
+				).WithStreams(gosh.StringIn("123"), gosh.ForwardOut, gosh.ForwardErr),
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+		})
+		It("should work as expected asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Then(
+					gosh.Shell(checkStdinChar('1')),
+					gosh.Shell(checkStdinChar('2')),
+					gosh.Shell(checkStdinChar('3')),
+				).WithStreams(gosh.BytesIn([]byte("123"))),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+		})
+	})
 })

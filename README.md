@@ -126,7 +126,7 @@ sh.Pipeline(x, y, z).Run()
 sh.FanOut(x, y, z).Start()
 ```
 
-The outputs of these functions have (mostly) the same interface as `Command`, meanning they can be passed back into eachother, with the exception that `Pipeline` can only accept `Command`s and other `Pipeline`s, where as the others can accept anything.
+The outputs of these functions have (mostly) the same interface as `Command`, meanning they can be passed back into eachother, with the exception that `Pipeline` cannot accept `FanOut`s.
 
 You can also pass your own types into these functions by implementing the `Commander` interface (for `Then`, `And`, `Or`, and `Fanout`), and `Pipelineable` (For `Pipeline`).
 
