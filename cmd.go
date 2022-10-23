@@ -85,22 +85,12 @@ func (c *Cmd) WithEnv(env map[string]string) *Cmd {
 	return c
 }
 
-// WithParentEnvAndCmd is a convienence wrapper for WithParentEnv() then WithEnv()
+// WithParentEnvAnd is a convienence wrapper for WithParentEnv() then WithEnv()
 func (c *Cmd) WithParentEnvAnd(env map[string]string) *Cmd {
 	if c.BuilderError != nil {
 		return c
 	}
 	return c.WithParentEnv().WithEnv(env)
-}
-
-func doDeferredBefore(deferredBefore []func() error) error {
-	for _, f := range deferredBefore {
-		err := f()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Run implements Commander
@@ -155,14 +145,17 @@ func (c *Cmd) Kill() error {
 	return c.Cmd.Process.Kill()
 }
 
+// DeferBefore implements Pipelineable
 func (c *Cmd) DeferBefore(f func() error) {
 	c.deferredBefore = append(c.deferredBefore, f)
 }
 
+// DeferAfter implements Pipelineable
 func (c *Cmd) DeferAfter(f func() error) {
 	c.deferredAfter = append(c.deferredAfter, f)
 }
 
+// WithStreams applies a set of StreamSetters to this command
 func (c *Cmd) WithStreams(fs ...StreamSetter) *Cmd {
 	if c.BuilderError != nil {
 		return c
@@ -173,7 +166,7 @@ func (c *Cmd) WithStreams(fs ...StreamSetter) *Cmd {
 	return c
 }
 
-// StdStdin implements Pipelineable
+// SetStdin implements Pipelineable
 func (c *Cmd) SetStdin(stdin io.Reader) error {
 	if c.BuilderError != nil {
 		return nil
@@ -182,7 +175,7 @@ func (c *Cmd) SetStdin(stdin io.Reader) error {
 	return nil
 }
 
-// StdStdout implements Pipelineable
+// SetStdout implements Pipelineable
 func (c *Cmd) SetStdout(stdout io.Writer) error {
 	if c.BuilderError != nil {
 		return nil
@@ -191,7 +184,7 @@ func (c *Cmd) SetStdout(stdout io.Writer) error {
 	return nil
 }
 
-// StdStderr implements Pipelineable
+// SetStderr implements Pipelineable
 func (c *Cmd) SetStderr(stderr io.Writer) error {
 	if c.BuilderError != nil {
 		return nil

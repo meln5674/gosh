@@ -34,6 +34,7 @@ func (f *FanOutCmd) WithMaxConcurrency(max int) *FanOutCmd {
 	return f
 }
 
+// Run implements Commander
 func (f *FanOutCmd) Run() error {
 	if f.BuilderError != nil {
 		return f.BuilderError
@@ -79,7 +80,7 @@ func (f *FanOutCmd) Start() error {
 					klog.V(0).Info("Wrote err")
 				case _ = <-f.kill:
 					klog.V(0).Info("Got kill signal, emptying cmdChan")
-					for _ = range cmdChan {
+					for range cmdChan {
 					}
 				}
 			}

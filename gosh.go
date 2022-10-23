@@ -38,6 +38,7 @@ type PipeSource func(io.Writer) error
 // A PipeSink is a function which can process the output (including standard error) of a command
 type PipeSink func(io.Reader) error
 
+// A StreamSetter modifies a command's streams
 type StreamSetter func(Pipelineable) error
 
 // SaveString returns a PipeSink which records the output in a string
@@ -117,27 +118,19 @@ func (e *MultiProcessError) Error() string {
 	return msg.String()
 }
 
-type DeferredError struct {
-	*MultiProcessError
-}
-
-// ForwardIn sets a a command's stdin to the current process's stdin
-func ForwardIn(p Pipelineable) error {
+func forwardIn(p Pipelineable) error {
 	return p.SetStdin(os.Stdin)
 }
 
-// ForwardOut sets a a command's stdout to the current process's stdout
-func ForwardOut(p Pipelineable) error {
+func forwardOut(p Pipelineable) error {
 	return p.SetStdout(os.Stdout)
 }
 
-// ForwardErr sets a a command's stderr to the current process's stderr
-func ForwardErr(p Pipelineable) error {
+func forwardErr(p Pipelineable) error {
 	return p.SetStderr(os.Stderr)
 }
 
-// ForwardInOut does both ForwardIn and ForwardOut
-func ForwardInOut(p Pipelineable) error {
+func forwardInOut(p Pipelineable) error {
 	err := ForwardIn(p)
 	if err != nil {
 		return err
@@ -145,8 +138,7 @@ func ForwardInOut(p Pipelineable) error {
 	return ForwardOut(p)
 }
 
-// ForwardInErr does both ForwardIn and ForwardErr
-func ForwardInErr(p Pipelineable) error {
+func forwardInErr(p Pipelineable) error {
 	err := ForwardIn(p)
 	if err != nil {
 		return err
@@ -154,8 +146,7 @@ func ForwardInErr(p Pipelineable) error {
 	return ForwardErr(p)
 }
 
-// ForwardOutErr does both ForwardOut and ForwardErr
-func ForwardOutErr(p Pipelineable) error {
+func forwardOutErr(p Pipelineable) error {
 	err := ForwardOut(p)
 	if err != nil {
 		return err
@@ -163,8 +154,7 @@ func ForwardOutErr(p Pipelineable) error {
 	return ForwardErr(p)
 }
 
-// ForwardAll does ForwardIn, ForwardOut, and ForwardErr
-func ForwardAll(p Pipelineable) error {
+func forwardAll(p Pipelineable) error {
 	err := ForwardIn(p)
 	if err != nil {
 		return err
@@ -173,13 +163,20 @@ func ForwardAll(p Pipelineable) error {
 }
 
 var (
-	_ = StreamSetter(ForwardIn)
-	_ = StreamSetter(ForwardOut)
-	_ = StreamSetter(ForwardErr)
-	_ = StreamSetter(ForwardInOut)
-	_ = StreamSetter(ForwardOutErr)
-	_ = StreamSetter(ForwardInErr)
-	_ = StreamSetter(ForwardAll)
+	// ForwardIn sets a a command's stdin to the current process's stdin
+	ForwardIn StreamSetter = forwardIn
+	// ForwardOut sets a a command's stdout to the current process's stdout
+	ForwardOut StreamSetter = forwardOut
+	// ForwardErr sets a a command's stderr to the current process's stderr
+	ForwardErr StreamSetter = forwardErr
+	// ForwardInOut does both ForwardIn and ForwardOut
+	ForwardInOut StreamSetter = forwardInOut
+	// ForwardInErr does both ForwardIn and ForwardErr
+	ForwardInErr StreamSetter = forwardInErr
+	// ForwardOutErr does both ForwardOut and ForwardErr
+	ForwardOutErr StreamSetter = forwardOutErr
+	// ForwardAll does ForwardIn, ForwardOut, and ForwardErr
+	ForwardAll StreamSetter = forwardAll
 )
 
 // FuncIn sets a function to pipe into the the stdin of this Cmd. You can think of this as pipeping your program directly into this Cmd's stdin. If this processing function fails, it will be returned from Run() or Wait() as if it were another process in the pipeline
@@ -381,6 +378,16 @@ func FileErr(path string) StreamSetter {
 		})
 		return nil
 	}
+}
+
+func doDeferredBefore(deferredBefore []func() error) error {
+	for _, f := range deferredBefore {
+		err := f()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func doDeferredAfter(retErr *error, deferredAfter []func() error) {

@@ -93,14 +93,17 @@ func (p *PipelineCmd) Start() error {
 	return nil
 }
 
+// DeferBefore implements Pipelineable
 func (p *PipelineCmd) DeferBefore(f func() error) {
 	p.Cmds[0].DeferBefore(f)
 }
 
+// DeferAfter implements Pipelineable
 func (p *PipelineCmd) DeferAfter(f func() error) {
 	p.Cmds[len(p.Cmds)-1].DeferAfter(f)
 }
 
+// WithStreams applies a set of StreamSetters to this pipeline. Input goes to the first command, output and error come from the last command
 func (p *PipelineCmd) WithStreams(fs ...StreamSetter) *PipelineCmd {
 	if p.BuilderError != nil {
 		return p
@@ -111,7 +114,7 @@ func (p *PipelineCmd) WithStreams(fs ...StreamSetter) *PipelineCmd {
 	return p
 }
 
-// StdStdin implements Pipelineable by setting stdin for the first command in the pipeline
+// SetStdin implements Pipelineable by setting stdin for the first command in the pipeline
 func (p *PipelineCmd) SetStdin(stdin io.Reader) error {
 	if p.BuilderError != nil {
 		return nil
@@ -119,7 +122,7 @@ func (p *PipelineCmd) SetStdin(stdin io.Reader) error {
 	return p.Cmds[0].SetStdin(stdin)
 }
 
-// StdStdout implements Pipelineable by setting stdout for the last command in the pipeline
+// SetStdout implements Pipelineable by setting stdout for the last command in the pipeline
 func (p *PipelineCmd) SetStdout(stdout io.Writer) error {
 	if p.BuilderError != nil {
 		return nil
@@ -127,7 +130,7 @@ func (p *PipelineCmd) SetStdout(stdout io.Writer) error {
 	return p.Cmds[len(p.Cmds)-1].SetStdout(stdout)
 }
 
-// StdStderr implements Pipelineable by setting stderr for all commands in the pipeline
+// SetStderr implements Pipelineable by setting stderr for all commands in the pipeline
 func (p *PipelineCmd) SetStderr(stderr io.Writer) error {
 	if p.BuilderError != nil {
 		return nil
@@ -154,7 +157,7 @@ func (p *PipelineCmd) Wait() error {
 	errChan := make(chan ixerr)
 	sem := make(chan struct{})
 	go func() {
-		for _ = range p.Cmds {
+		for range p.Cmds {
 			_ = <-sem
 		}
 		close(errChan)

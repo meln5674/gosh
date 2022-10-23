@@ -1,6 +1,6 @@
 GINKGO_VERSION := v2.3.1
 
-PHONY: ginkgo
+PHONY: ginkgo view-coverage lint
 
 all: coverage.html
 
@@ -18,3 +18,7 @@ bin/coverage.html: bin/coverage.out
 
 view-coverage: bin/coverage.html
 	xdg-open bin/coverage.html
+
+lint:
+	go vet ./...
+	golint
