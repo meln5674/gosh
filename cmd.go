@@ -103,7 +103,7 @@ func (c *Cmd) Run() (err error) {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("%s %v", c.Path, c.Args)
+	klog.V(11).Infof("started: %s %v", c.Path, c.Args)
 	err = c.Cmd.Run()
 	klog.V(11).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
@@ -131,9 +131,9 @@ func (c *Cmd) Start() error {
 // Wait implements Commander
 func (c *Cmd) Wait() (err error) {
 	defer doDeferredAfter(&err, c.deferredAfter)
-	klog.V(11).Info("waiting: %s %v", c.Path, c.Args)
+	klog.V(11).Infof("waiting: %s %v", c.Path, c.Args)
 	err = c.Cmd.Wait()
-	klog.V(11).Info("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
+	klog.V(11).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
 		return
 	}
