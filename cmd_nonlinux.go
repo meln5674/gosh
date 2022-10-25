@@ -4,6 +4,7 @@ package gosh
 
 import (
 	"k8s.io/klog/v2"
+	"os/exec"
 )
 
 // A Cmd is a wrapper for building os/exec.Cmd's

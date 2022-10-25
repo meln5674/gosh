@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !linux
 
 package gosh_test
 
@@ -50,7 +50,7 @@ var _ = Describe("Queue", func() {
 					cmd := gosh.Shell(allOf(
 						makeSentinel(dir, name),
 						waitForSentinels(dir, names...),
-					)).UsingProcessGroup()
+					))
 					cmds = append(cmds, cmd)
 					shells <- cmd
 				}
