@@ -11,16 +11,6 @@ import (
 	"strings"
 )
 
-// A Cmd is a wrapper for building os/exec.Cmd's
-type Cmd struct {
-	*exec.Cmd
-	RawCmd []string
-	// BuilderError is set if a builder method like FileOut fails. Run() and Start() will return this error if set. Further builder methods will do nothing if this is set.
-	BuilderError   error
-	deferredBefore []func() error
-	deferredAfter  []func() error
-}
-
 var (
 	_ = Pipelineable(&Cmd{})
 )
@@ -103,7 +93,7 @@ func (c *Cmd) Run() (err error) {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("started: %s %v", c.Path, c.Args)
+	klog.V(11).Infof("starting: %s %v", c.Path, c.Args)
 	err = c.Cmd.Run()
 	klog.V(11).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
@@ -125,27 +115,29 @@ func (c *Cmd) Start() error {
 		return err
 	}
 	klog.V(11).Infof("%s %v &", c.Path, c.Args)
-	return c.Cmd.Start()
+	klog.V(11).Infof("starting: %s %v", c.Path, c.Args)
+	err = c.Cmd.Start()
+	if err != nil {
+		return err
+	}
+
+	klog.V(11).Infof("started %d: %s %v", c.Process.Pid, c.Path, c.Args)
+	return nil
 }
 
 // Wait implements Commander
 func (c *Cmd) Wait() (err error) {
+	if c.Process == nil {
+		return ErrNotStarted
+	}
 	defer doDeferredAfter(&err, c.deferredAfter)
-	klog.V(11).Infof("waiting: %s %v", c.Path, c.Args)
+	klog.V(11).Infof("waiting %d: %s %v", c.Cmd.Process.Pid, c.Path, c.Args)
 	err = c.Cmd.Wait()
-	klog.V(11).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
+	klog.V(11).Infof("exited %d (%d): %s %v", c.Cmd.Process.Pid, c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
 	if err != nil {
 		return
 	}
 	return
-}
-
-// Kill implements Commander
-func (c *Cmd) Kill() error {
-	if c.Cmd.Process == nil {
-		return ErrNotStarted
-	}
-	return c.Cmd.Process.Kill()
 }
 
 // DeferBefore implements Pipelineable
