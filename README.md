@@ -10,7 +10,7 @@ To import
 ```go
 
 import (
-    sh "github.com/meln5674/gosh/pkg/command"
+    sh "github.com/meln5674/gosh"
 )
 ```
 
