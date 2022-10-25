@@ -10,6 +10,7 @@ type FanOutCmd struct {
 	Cmds           []Commander
 	MaxConcurrency int
 	sem            chan struct{}
+	cmdChan        chan Commander
 	errChan        chan error
 	kill           chan struct{}
 	mutex          chan struct{}
@@ -56,16 +57,16 @@ func (f *FanOutCmd) Start() error {
 	if f.BuilderError != nil {
 		return f.BuilderError
 	}
-	cmdChan := make(chan Commander)
+	f.cmdChan = make(chan Commander)
 	f.errChan = make(chan error)
 	f.sem = make(chan struct{})
 	f.kill = make(chan struct{}, 1)
 	f.mutex = make(chan struct{}, 1)
 	go func() {
 		for _, cmd := range f.Cmds {
-			cmdChan <- cmd
+			f.cmdChan <- cmd
 		}
-		close(cmdChan)
+		close(f.cmdChan)
 		klog.V(11).Info("all commands pushed")
 	}()
 	for ix := 0; ix < f.MaxConcurrency; ix++ {
@@ -82,28 +83,33 @@ func (f *FanOutCmd) Start() error {
 					var cmd Commander
 					var ok bool
 
-					func() {
-						f.mutex <- struct{}{}
-						defer func() { _ = <-f.mutex }()
+					f.sync(func() {
 						select {
-						case cmd, ok = <-cmdChan:
+						case cmd, ok = <-f.cmdChan:
 							if !ok {
 								killed = true
 								return
 							}
-							klog.V(11).Info("Wrote err")
+							err := cmd.Start()
+							if err != nil {
+								klog.V(11).Info("Wrote err")
+								f.errChan <- err
+								return
+							}
+
 						case _ = <-f.kill:
 							klog.V(11).Info("Got kill signal, emptying cmdChan")
-							for range cmdChan {
+							for range f.cmdChan {
 							}
 							killed = true
 							return
 						}
-					}()
+					})
 					if killed {
 						return
 					}
-					f.errChan <- cmd.Run()
+					klog.V(11).Info("Wrote err")
+					f.errChan <- cmd.Wait()
 				}()
 			}
 		}()
@@ -137,20 +143,26 @@ func (f *FanOutCmd) Wait() error {
 
 // Kill implements Commander
 func (f *FanOutCmd) Kill() error {
-	f.kill <- struct{}{}
 	errs := make([]error, 0, len(f.Cmds))
-	func() {
-		f.mutex <- struct{}{}
-		defer func() { _ = <-f.mutex }()
+	f.sync(func() {
+		close(f.kill)
+		for range f.cmdChan {
+		}
 		for _, cmd := range f.Cmds {
 			err := cmd.Kill()
 			if err != nil && !errors.Is(err, ErrNotStarted) {
 				errs = append(errs, err)
 			}
 		}
-	}()
+	})
 	if len(errs) != 0 {
 		return &MultiProcessError{Errors: errs}
 	}
 	return nil
+}
+
+func (f *FanOutCmd) sync(fn func()) {
+	f.mutex <- struct{}{}
+	defer func() { _ = <-f.mutex }()
+	fn()
 }

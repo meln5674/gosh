@@ -6,7 +6,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"errors"
-	"flag"
 	"fmt"
 	"github.com/meln5674/gosh"
 	"io"
@@ -15,10 +14,6 @@ import (
 )
 
 var _ = Describe("Cmd", func() {
-	klog.InitFlags(nil)
-	flag.Set("logtostderr", "false")
-	klog.SetOutput(GinkgoWriter)
-
 	When("testing mocks", func() {
 		useMocks()
 		It("should work", func() {

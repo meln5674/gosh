@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"bytes"
+	"flag"
 	"fmt"
 	"github.com/meln5674/gosh"
 	"io"
@@ -17,6 +18,11 @@ import (
 
 func TestGosh(t *testing.T) {
 	RegisterFailHandler(Fail)
+	klog.InitFlags(nil)
+	flag.Set("logtostderr", "false")
+	//flag.Set("v", "11")
+	klog.SetOutput(GinkgoWriter)
+
 	RunSpecs(t, "Gosh Suite")
 }
 
