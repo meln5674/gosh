@@ -39,6 +39,9 @@ func Shell(script string) *Cmd {
 
 // WithContext assigns a context to this command. WARNING: Because this requires re-creating the underlying os/exec.Cmd, this should ALWAYS be the first method called on a new Cmd
 func (c *Cmd) WithContext(ctx context.Context) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
 	exe := c.RawCmd[0]
 	var args []string
 	if len(c.RawCmd) > 1 {
