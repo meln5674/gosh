@@ -179,6 +179,27 @@ var (
 	ForwardAll StreamSetter = forwardAll
 )
 
+// ReaderIn sets a reader as Stdin, equivalent to calling SetStdin, but usable with WithStreams
+func ReaderIn(r io.Reader) StreamSetter {
+	return func(p Pipelineable) error {
+		return p.SetStdin(r)
+	}
+}
+
+// WriterOut sets a writer as Stdout, equivalent to calling SetStdout, but usable with WithStreams
+func WriterOut(w io.Writer) StreamSetter {
+	return func(p Pipelineable) error {
+		return p.SetStdout(w)
+	}
+}
+
+// WriterErr sets a writer as Stderr, equivalent to calling SetStderr, but usable with WithStreams
+func WriterErr(w io.Writer) StreamSetter {
+	return func(p Pipelineable) error {
+		return p.SetStderr(w)
+	}
+}
+
 // FuncIn sets a function to pipe into the the stdin of this Cmd. You can think of this as pipeping your program directly into this Cmd's stdin. If this processing function fails, it will be returned from Run() or Wait() as if it were another process in the pipeline
 func FuncIn(handler PipeSource) StreamSetter {
 	return func(p Pipelineable) error {
