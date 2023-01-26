@@ -179,6 +179,19 @@ var (
 	ForwardAll StreamSetter = forwardAll
 )
 
+// SetStreams combines multiple StreamSetters into a single value. This is useful if you want to make utility StreamSetters that set multiple streams.
+func SetStreams(setters ...StreamSetter) StreamSetter {
+	return func(p Pipelineable) error {
+		for _, setter := range setters {
+			err := setter(p)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 // ReaderIn sets a reader as Stdin, equivalent to calling SetStdin, but usable with WithStreams
 func ReaderIn(r io.Reader) StreamSetter {
 	return func(p Pipelineable) error {
