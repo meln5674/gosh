@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"k8s.io/klog/v2"
 	"os"
 	"os/exec"
 	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -101,9 +102,9 @@ func (c *Cmd) Run() (err error) {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("starting: %s %v", c.Path, c.Args)
+	klog.V(11).Infof("starting: %v", c.AsShellArgs())
 	err = c.Cmd.Run()
-	klog.V(11).Infof("exited %d: %s %v", c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
+	klog.V(11).Infof("exited %d: %v", c.Cmd.ProcessState.ExitCode(), c.AsShellArgs())
 	if err != nil {
 		return
 	}
@@ -122,14 +123,14 @@ func (c *Cmd) Start() error {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("%s %v &", c.Path, c.Args)
-	klog.V(11).Infof("starting: %s %v", c.Path, c.Args)
+	klog.V(11).Infof("%v &", c.AsShellArgs())
+	klog.V(11).Infof("starting: %v", c.AsShellArgs())
 	err = c.Cmd.Start()
 	if err != nil {
 		return err
 	}
 
-	klog.V(11).Infof("started %d: %s %v", c.Process.Pid, c.Path, c.Args)
+	klog.V(11).Infof("started %d: %v", c.Process.Pid, c.AsShellArgs())
 	return nil
 }
 
@@ -139,9 +140,9 @@ func (c *Cmd) Wait() (err error) {
 		return ErrNotStarted
 	}
 	defer doDeferredAfter(&err, c.deferredAfter)
-	klog.V(11).Infof("waiting %d: %s %v", c.Cmd.Process.Pid, c.Path, c.Args)
+	klog.V(11).Infof("waiting %d: %v", c.Cmd.Process.Pid, c.AsShellArgs())
 	err = c.Cmd.Wait()
-	klog.V(11).Infof("exited %d (%d): %s %v", c.Cmd.Process.Pid, c.Cmd.ProcessState.ExitCode(), c.Path, c.Args)
+	klog.V(11).Infof("exited %d (%d): %v", c.Cmd.Process.Pid, c.Cmd.ProcessState.ExitCode(), c.AsShellArgs())
 	if err != nil {
 		return
 	}
@@ -194,4 +195,17 @@ func (c *Cmd) SetStderr(stderr io.Writer) error {
 	}
 	c.Stderr = stderr
 	return nil
+}
+
+func shellQuote(s string) string {
+	return fmt.Sprintf("'%s'", strings.ReplaceAll(s, "'", `\'`))
+}
+
+func (c *Cmd) AsShellArgs() []string {
+	args := make([]string, 0, len(c.RawCmd))
+	args = append(args, shellQuote(c.Path))
+	for _, arg := range c.RawCmd[1:] {
+		args = append(args, shellQuote(arg))
+	}
+	return args
 }

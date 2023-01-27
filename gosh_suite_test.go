@@ -1,32 +1,35 @@
 package gosh_test
 
 import (
+	"testing"
+
 	. "github.com/meln5674/gosh/pkg/gomega"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/klog/v2"
-	"testing"
 
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/meln5674/gosh"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/meln5674/gosh"
 )
 
 func TestGosh(t *testing.T) {
 	RegisterFailHandler(Fail)
 	klog.InitFlags(nil)
 	flag.Set("logtostderr", "false")
-	//flag.Set("v", "11")
+	flag.Set("v", "11")
 	klog.SetOutput(GinkgoWriter)
 
 	RunSpecs(t, "Gosh Suite")
 }
 
 var _ = BeforeSuite(func() {
+
 	klog.SetOutput(GinkgoWriter)
 })
 
