@@ -54,6 +54,7 @@ func Pipeline(cmd ...Pipelineable) *PipelineCmd {
 			cleanupPipes(ix + 1)
 			return &PipelineCmd{BuilderError: err}
 		}
+		prevCmd = nextCmd
 	}
 	return &PipelineCmd{Cmds: cmd, InPipes: inPipes, OutPipes: outPipes}
 }

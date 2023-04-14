@@ -5,10 +5,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	"errors"
-	"github.com/meln5674/gosh"
 	"io"
 	"io/ioutil"
 	"os"
+
+	"github.com/meln5674/gosh"
 )
 
 var _ = Describe("PipelineCmd", func() {
@@ -18,6 +19,23 @@ var _ = Describe("PipelineCmd", func() {
 			Expect(gosh.Pipeline().Start()).ToNot(Succeed())
 			Expect(gosh.Pipeline(gosh.Command("echo")).Run()).ToNot(Succeed())
 			Expect(gosh.Pipeline(gosh.Command("echo")).Start()).ToNot(Succeed())
+		})
+	})
+
+	When("Using more than 2 commands", func() {
+		useMocks()
+
+		It("should work as expected", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Pipeline(
+					gosh.Shell(`sed -E 's/(.*)/x\1/'`),
+					gosh.Shell(`sed -E 's/(.*)/y\1/'`),
+					gosh.Shell(`sed -E 's/(.*)/z\1/'`),
+				).WithStreams(gosh.ForwardAll),
+				stdin:  "1\n2\n3\n",
+				stdout: "zyx1\nzyx2\nzyx3\n",
+				stderr: "",
+			})
 		})
 	})
 
