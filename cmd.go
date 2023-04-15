@@ -92,6 +92,15 @@ func (c *Cmd) WithParentEnvAnd(env map[string]string) *Cmd {
 	return c.WithParentEnv().WithEnv(env)
 }
 
+// WithWorkingDir sets the working directory (PWD/CWD) for the command
+func (c *Cmd) WithWorkingDir(dir string) *Cmd {
+	if c.BuilderError != nil {
+		return c
+	}
+	c.Cmd.Dir = dir
+	return c
+}
+
 // Run implements Commander
 func (c *Cmd) Run() (err error) {
 	if c.BuilderError != nil {
