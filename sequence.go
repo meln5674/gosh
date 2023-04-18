@@ -61,7 +61,6 @@ func (s *SequenceCmd) Run() error {
 		}
 	}
 	return err
-
 }
 
 // Start implements Commander
@@ -189,15 +188,6 @@ func (s *SequenceCmd) WithStreams(fs ...StreamSetter) *SequenceCmd {
 func And(cmds ...Commander) *SequenceCmd {
 	return Sequence(
 		func(s *SequenceCmd, ix int, err error, killed bool) (continu bool, finalError error) {
-			if ix == len(s.Cmds)-1 {
-				errs := make([]error, 0, len(s.CmdErrors))
-				for _, cmdErr := range s.CmdErrors {
-					errs = append(errs, cmdErr)
-				}
-				if len(errs) != 0 {
-					return true, &MultiProcessError{Errors: errs}
-				}
-			}
 			if err != nil {
 				return false, err
 			}
@@ -212,13 +202,14 @@ func Or(cmds ...Commander) *SequenceCmd {
 	return Sequence(
 		func(s *SequenceCmd, ix int, err error, killed bool) (continu bool, finalError error) {
 			if ix == len(s.Cmds)-1 {
+				if err == nil {
+					return true, nil
+				}
 				errs := make([]error, 0, len(s.CmdErrors))
 				for _, cmdErr := range s.CmdErrors {
 					errs = append(errs, cmdErr)
 				}
-				if len(errs) != 0 {
-					return true, &MultiProcessError{Errors: errs}
-				}
+				return true, &MultiProcessError{Errors: errs}
 			}
 			if err != nil {
 				return true, err

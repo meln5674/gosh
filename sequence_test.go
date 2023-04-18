@@ -122,7 +122,7 @@ var _ = Describe("And", func() {
 var _ = Describe("Or", func() {
 	When("Everything fails", func() {
 		useMocks()
-		It("should run all commands", func() {
+		It("should run all commands and fail", func() {
 			genericTest(genericTestArgs{
 				cmd: gosh.Or(
 					gosh.Shell(allOf(printStdout("1"), fail())),
@@ -135,7 +135,7 @@ var _ = Describe("Or", func() {
 				err:    &exec.ExitError{},
 			})
 		})
-		It("should run all commands asynchronously", func() {
+		It("should run all commands and fail asynchronously", func() {
 			genericTest(genericTestArgs{
 				cmd: gosh.Or(
 					gosh.Shell(allOf(printStdout("1"), fail())),
@@ -174,6 +174,34 @@ var _ = Describe("Or", func() {
 				async:  true,
 				stdin:  "",
 				stdout: "12",
+				stderr: "",
+			})
+		})
+	})
+	When("The last command succeeds", func() {
+		useMocks()
+		It("should report success", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(allOf(printStdout("2"), fail())),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				stdin:  "",
+				stdout: "123",
+				stderr: "",
+			})
+		})
+		It("report successfter it asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.Or(
+					gosh.Shell(allOf(printStdout("1"), fail())),
+					gosh.Shell(allOf(printStdout("2"), fail())),
+					gosh.Shell(printStdout("3")),
+				).WithStreams(gosh.ForwardOut),
+				async:  true,
+				stdin:  "",
+				stdout: "123",
 				stderr: "",
 			})
 		})
