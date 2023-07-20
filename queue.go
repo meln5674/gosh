@@ -2,6 +2,7 @@ package gosh
 
 import (
 	"errors"
+
 	"k8s.io/klog/v2"
 )
 
@@ -74,6 +75,12 @@ func (q *QueueCmd) Run() error {
 	return nil
 }
 
+type syncState struct {
+	inFlight map[Commander]struct{}
+	killed   bool
+	done     bool
+}
+
 // Start implements Commander
 func (q *QueueCmd) Start() error {
 	if q.BuilderError != nil {
@@ -95,9 +102,8 @@ func (q *QueueCmd) Start() error {
 	q.kill = make(chan struct{}, 1)
 	q.killErrs = make(chan error)
 	q.mutex = make(chan struct{}, 1)
-	inFlight := make(map[Commander]struct{}, 0)
-	killed := false
-	done := false
+	var state syncState
+	state.inFlight = make(map[Commander]struct{}, 0)
 	if q.MaxConcurrency < 1 {
 		// If there is no cap, we start a goroutine which iterates over the command channel,
 		// and starts goroutines for each command it gets
@@ -105,24 +111,35 @@ func (q *QueueCmd) Start() error {
 		// it counts to make sure that many command goroutines finish, successfully or otherwise
 		go func() {
 			cmdsStarted := 0
-			for !killed && !done {
+			var currentState syncState
+			q.sync(func() {
+				currentState = state
+			})
+			for !currentState.killed && !currentState.done {
 				var cmd Commander
 				var ok bool
 				q.sync(func() {
+					defer func() {
+						currentState = state
+						if currentState.done {
+							klog.V(11).Info("done=true")
+						}
+					}()
 					select {
 					case cmd, ok = <-q.Cmds:
 						if !ok {
-							done = true
+							state.done = true
 							return
 						}
-						klog.V(11).Info("Wrote err")
 					case _ = <-q.kill:
-						killed = true
+						state.killed = true
 						return
 					}
-					if killed || done {
+					if state.killed || state.done {
 						return
 					}
+					cmdsStarted++
+					klog.V(11).Infof("Commands started = %d", cmdsStarted)
 					go func(cmd Commander) {
 						defer func() {
 							q.sem <- struct{}{}
@@ -130,25 +147,39 @@ func (q *QueueCmd) Start() error {
 							klog.V(11).Info("fanout finished")
 						}()
 						defer q.sync(func() {
-							delete(inFlight, cmd)
+							delete(state.inFlight, cmd)
 						})
+						var started bool
 						q.sync(func() {
 							err := cmd.Start()
 							if err != nil {
 								q.errChan <- err
 								return
 							}
-							cmdsStarted++
-							// TODO: Do we need a second lock just for inFlight?
-							inFlight[cmd] = struct{}{}
+							started = true
+							state.inFlight[cmd] = struct{}{}
 						})
-						q.errChan <- cmd.Wait()
+						if started {
+							q.errChan <- cmd.Wait()
+						}
 					}(cmd)
 				})
 			}
-			for ix := 0; ix < cmdsStarted; ix++ {
-				_ = <-q.sem
-				klog.V(11).Info("sem--")
+			cmdsCompleted := 0
+			for {
+				var currentState syncState
+				var newStarted int
+				q.sync(func() {
+					currentState = state
+					newStarted = cmdsStarted
+				})
+				for _ = cmdsCompleted; cmdsCompleted < newStarted; cmdsCompleted++ {
+					_ = <-q.sem
+					klog.V(11).Info("sem--")
+				}
+				if currentState.done {
+					break
+				}
 			}
 
 			klog.V(11).Info("all fanouts finished")
@@ -167,40 +198,55 @@ func (q *QueueCmd) Start() error {
 					klog.V(11).Info("sem++")
 					klog.V(11).Info("fanout finished")
 				}()
-				for !killed && !done {
+				var currentState syncState
+				for {
+					q.sync(func() {
+						currentState = state
+					})
+					if currentState.done || currentState.killed {
+						break
+					}
 					func() {
 						var cmd Commander
 						var ok bool
+						var currentState syncState
 
 						q.sync(func() {
+							defer func() {
+								currentState = state
+							}()
 							select {
 							case cmd, ok = <-q.Cmds:
 								if !ok {
-									done = true
+									state.done = true
 									return
 								}
 								klog.V(11).Info("Wrote err")
 							case _ = <-q.kill:
-								killed = true
+								state.done = true
 								return
 							}
 						})
-						if killed || done {
+						if currentState.killed || currentState.done {
 							return
 						}
 						func() {
 							defer q.sync(func() {
-								delete(inFlight, cmd)
+								delete(state.inFlight, cmd)
 							})
+							var started bool
 							q.sync(func() {
 								err := cmd.Start()
 								if err != nil {
 									q.errChan <- err
 									return
 								}
-								inFlight[cmd] = struct{}{}
+								started = true
+								state.inFlight[cmd] = struct{}{}
 							})
-							q.errChan <- cmd.Wait()
+							if started {
+								q.errChan <- cmd.Wait()
+							}
 						}()
 					}()
 				}
@@ -228,8 +274,8 @@ func (q *QueueCmd) Start() error {
 		// We have to copy in the lock, and then iterate the copy outside of the lock
 		var inFlightCopy []Commander
 		q.sync(func() {
-			inFlightCopy = make([]Commander, 0, len(inFlight))
-			for cmd := range inFlight {
+			inFlightCopy = make([]Commander, 0, len(state.inFlight))
+			for cmd := range state.inFlight {
 				inFlightCopy = append(inFlightCopy, cmd)
 			}
 		})

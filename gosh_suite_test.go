@@ -1,6 +1,8 @@
 package gosh_test
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	. "github.com/meln5674/gosh/pkg/gomega"
@@ -98,6 +100,7 @@ func doubleKill(f func() gosh.Commander) {
 var (
 	stdin, stdout, stderr                  *os.File
 	mockStdin, mockStdout, mockStderr      *bytes.Buffer
+	mockStdinLock                          sync.Mutex
 	startMocks, stopMockIn, stopMockOutErr func()
 	ginkgoWriter                           GinkgoWriterInterface
 	mockLock                               = make(chan struct{}, 1)
@@ -137,10 +140,19 @@ func mockStd() (stdin, stdout, stderr *bytes.Buffer, start, closeIn, closeOutErr
 				case _ = <-stdinDone:
 					break loop
 				default:
-					io.Copy(stdinWrite, stdin)
+					func() {
+						mockStdinLock.Lock()
+						defer mockStdinLock.Unlock()
+						io.Copy(stdinWrite, stdin)
+					}()
 				}
 			}
-			io.Copy(stdinWrite, stdin)
+			func() {
+				mockStdinLock.Lock()
+				defer mockStdinLock.Unlock()
+
+				io.Copy(stdinWrite, stdin)
+			}()
 			stdinDoneACK <- struct{}{}
 		}()
 		go func() {
@@ -262,8 +274,12 @@ func genericTest(args genericTestArgs) {
 		startMocks()
 		defer stopMockOutErr()
 		if !args.ignoreStdin {
-			_, err := mockStdin.WriteString(args.stdin)
-			Expect(err).ToNot(HaveOccurred(), "Failed to write mock standard input")
+			func() {
+				mockStdinLock.Lock()
+				defer mockStdinLock.Unlock()
+				_, err := mockStdin.WriteString(args.stdin)
+				Expect(err).ToNot(HaveOccurred(), "Failed to write mock standard input")
+			}()
 		}
 		stopMockIn()
 		if args.async {
@@ -339,6 +355,12 @@ func inOutPassthrough() string {
 
 func fail() string {
 	return "exit 1"
+}
+
+func failToStart(ctx context.Context) gosh.Commander {
+	return gosh.FromFunc(ctx, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, done chan error) error {
+		return fmt.Errorf("This command fails to start")
+	})
 }
 
 func allOf(s ...string) string {

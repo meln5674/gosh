@@ -2,6 +2,7 @@ package gosh
 
 import (
 	"errors"
+
 	"k8s.io/klog/v2"
 )
 
@@ -82,6 +83,7 @@ func (f *FanOutCmd) Start() error {
 				func() {
 					var cmd Commander
 					var ok bool
+					var started bool
 
 					f.sync(func() {
 						select {
@@ -96,6 +98,7 @@ func (f *FanOutCmd) Start() error {
 								f.errChan <- err
 								return
 							}
+							started = true
 
 						case _ = <-f.kill:
 							klog.V(11).Info("Got kill signal, emptying cmdChan")
@@ -108,8 +111,10 @@ func (f *FanOutCmd) Start() error {
 					if killed {
 						return
 					}
-					klog.V(11).Info("Wrote err")
-					f.errChan <- cmd.Wait()
+					if started {
+						klog.V(11).Info("Wrote err")
+						f.errChan <- cmd.Wait()
+					}
 				}()
 			}
 		}()

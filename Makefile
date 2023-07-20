@@ -1,23 +1,24 @@
+GINKGO ?= bin/ginkgo
 GINKGO_VERSION := v2.3.1
 
 PHONY: ginkgo view-coverage lint
 
-all: coverage.html
+all: bin/coverage.html
 
-ginkgo:
-	which ginko || (cd ~; go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION))
+bin/ginkgo:
+	GOBIN=$(PWD)/bin/ go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
 
 bin:
 	mkdir -p bin
 
-bin/coverage.out: bin ginkgo gosh.go $(wildcard *_test.go)
-	go test -v -coverprofile=bin/coverage.out ./
+bin/coverage.out: test
 
-bin/coverage.html: bin/coverage.out
+view-coverage: bin/coverage.out
 	go tool cover -html=bin/coverage.out
 
-view-coverage: bin/coverage.html
-	xdg-open bin/coverage.html
+.PHONY: test
+test: bin $(GINKGO) gosh.go $(wildcard *_test.go)
+	$(GINKGO) run --trace --race -coverprofile=bin/coverage.out ./
 
 lint:
 	go vet ./...
