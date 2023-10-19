@@ -3,7 +3,7 @@ package gosh
 import (
 	"errors"
 
-	"k8s.io/klog/v2"
+	"github.com/go-logr/logr"
 )
 
 // A QueueCmd is like a FanOut, but instead of requiring all commands to be known upfront, it reads commands from a channel until it is closed
@@ -11,6 +11,7 @@ type QueueCmd struct {
 	Cmds             chan Commander
 	MaxConcurrency   int
 	ResultBufferSize int
+	Log              logr.Logger
 	sem              chan struct{}
 	errChan          chan error
 	kill             chan struct{}
@@ -32,6 +33,19 @@ func (q *QueueCmd) sync(f func()) {
 // Queue creates a new QueueCmd that lets all commands run at the same time
 func Queue(cmds chan Commander) *QueueCmd {
 	return &QueueCmd{Cmds: cmds}
+}
+
+// WithLog sets a log to use for this queue
+func (q *QueueCmd) WithLog(log logr.Logger) *QueueCmd {
+	q.Log = log
+	return q
+}
+
+func (q *QueueCmd) log() logr.Logger {
+	if q.Log.IsZero() {
+		return GlobalLog
+	}
+	return q.Log
 }
 
 // WithMaxConcurrency sets the maximum number of commans that can run at the same time
@@ -122,7 +136,7 @@ func (q *QueueCmd) Start() error {
 					defer func() {
 						currentState = state
 						if currentState.done {
-							klog.V(11).Info("done=true")
+							q.log().V(DebugLogLevel).Info("done=true")
 						}
 					}()
 					select {
@@ -139,12 +153,12 @@ func (q *QueueCmd) Start() error {
 						return
 					}
 					cmdsStarted++
-					klog.V(11).Infof("Commands started = %d", cmdsStarted)
+					q.log().V(DebugLogLevel).Info("Commands started", "count", cmdsStarted)
 					go func(cmd Commander) {
 						defer func() {
 							q.sem <- struct{}{}
-							klog.V(11).Info("sem++")
-							klog.V(11).Info("fanout finished")
+							q.log().V(DebugLogLevel).Info("sem++")
+							q.log().V(DebugLogLevel).Info("fanout finished")
 						}()
 						defer q.sync(func() {
 							delete(state.inFlight, cmd)
@@ -175,14 +189,14 @@ func (q *QueueCmd) Start() error {
 				})
 				for _ = cmdsCompleted; cmdsCompleted < newStarted; cmdsCompleted++ {
 					_ = <-q.sem
-					klog.V(11).Info("sem--")
+					q.log().V(DebugLogLevel).Info("sem--")
 				}
 				if currentState.done {
 					break
 				}
 			}
 
-			klog.V(11).Info("all fanouts finished")
+			q.log().V(DebugLogLevel).Info("all fanouts finished")
 			close(q.errChan)
 		}()
 	} else {
@@ -192,11 +206,11 @@ func (q *QueueCmd) Start() error {
 		// to exit
 		for ix := 0; ix < q.MaxConcurrency; ix++ {
 			go func() {
-				klog.V(11).Info("fanout started")
+				q.log().V(DebugLogLevel).Info("fanout started")
 				defer func() {
 					q.sem <- struct{}{}
-					klog.V(11).Info("sem++")
-					klog.V(11).Info("fanout finished")
+					q.log().V(DebugLogLevel).Info("sem++")
+					q.log().V(DebugLogLevel).Info("fanout finished")
 				}()
 				var currentState syncState
 				for {
@@ -221,7 +235,7 @@ func (q *QueueCmd) Start() error {
 									state.done = true
 									return
 								}
-								klog.V(11).Info("Wrote err")
+								q.log().V(DebugLogLevel).Info("Wrote err")
 							case _ = <-q.kill:
 								state.done = true
 								return
@@ -255,9 +269,9 @@ func (q *QueueCmd) Start() error {
 		go func() {
 			for ix := 0; ix < q.MaxConcurrency; ix++ {
 				_ = <-q.sem
-				klog.V(11).Info("sem--")
+				q.log().V(DebugLogLevel).Info("sem--")
 			}
-			klog.V(11).Info("all fanouts finished")
+			q.log().V(DebugLogLevel).Info("all fanouts finished")
 			close(q.errChan)
 		}()
 	}
@@ -293,7 +307,7 @@ func (q *QueueCmd) Start() error {
 func (q *QueueCmd) Wait() error {
 	errs := make([]error, 0)
 	for err := range q.errChan {
-		klog.V(11).Info("Read err")
+		q.log().V(DebugLogLevel).Info("Read err")
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -303,7 +317,7 @@ func (q *QueueCmd) Wait() error {
 			close(q.kill)
 		}
 	})
-	klog.V(11).Info("all errors recorded")
+	q.log().V(DebugLogLevel).Info("all errors recorded")
 	if len(errs) != 0 {
 		return &MultiProcessError{Errors: errs}
 	}

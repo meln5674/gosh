@@ -3,14 +3,14 @@ package gosh_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/klog/v2"
 
 	"errors"
 	"fmt"
-	"github.com/meln5674/gosh"
 	"io"
 	"io/ioutil"
 	"os"
+
+	"github.com/meln5674/gosh"
 )
 
 var _ = Describe("Cmd", func() {
@@ -18,7 +18,7 @@ var _ = Describe("Cmd", func() {
 		useMocks()
 		It("should work", func() {
 			startMocks()
-			klog.Info("This should go to the real stderr")
+			log.Info("This should go to the real stderr")
 			stopMockIn()
 			stopMockOutErr()
 			Expect(mockStderr.String()).To(HaveLen(0))

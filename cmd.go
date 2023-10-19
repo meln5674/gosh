@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"k8s.io/klog/v2"
+	"github.com/go-logr/logr"
 )
 
 var (
@@ -36,6 +36,19 @@ func Shell(script string) *Cmd {
 		return &Cmd{BuilderError: errors.New("SHELL is not set")}
 	}
 	return Command(shell, "-c", script)
+}
+
+// WithLog sets a logger to use for this command
+func (c *Cmd) WithLog(log logr.Logger) *Cmd {
+	c.Log = log
+	return c
+}
+
+func (c *Cmd) log() logr.Logger {
+	if c.Log.IsZero() {
+		return GlobalLog
+	}
+	return c.Log
 }
 
 // WithContext assigns a context to this command. WARNING: Because this requires re-creating the underlying os/exec.Cmd, this should ALWAYS be the first method called on a new Cmd
@@ -111,9 +124,9 @@ func (c *Cmd) Run() (err error) {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("starting: %v", c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("starting: %v", c.AsShellArgs()))
 	err = c.Cmd.Run()
-	klog.V(11).Infof("exited %d: %v", c.Cmd.ProcessState.ExitCode(), c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("exited: %v", c.AsShellArgs()), "exit-status", c.Cmd.ProcessState.ExitCode())
 	if err != nil {
 		return
 	}
@@ -132,14 +145,13 @@ func (c *Cmd) Start() error {
 	if err != nil {
 		return err
 	}
-	klog.V(11).Infof("%v &", c.AsShellArgs())
-	klog.V(11).Infof("starting: %v", c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("starting: %v", c.AsShellArgs()))
 	err = c.Cmd.Start()
 	if err != nil {
 		return err
 	}
 
-	klog.V(11).Infof("started %d: %v", c.Process.Pid, c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("started: %v", c.AsShellArgs()), "pid", c.Process.Pid)
 	return nil
 }
 
@@ -149,9 +161,9 @@ func (c *Cmd) Wait() (err error) {
 		return ErrNotStarted
 	}
 	defer doDeferredAfter(&err, c.deferredAfter)
-	klog.V(11).Infof("waiting %d: %v", c.Cmd.Process.Pid, c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("waiting: %v", c.AsShellArgs()), "pid", c.Process.Pid)
 	err = c.Cmd.Wait()
-	klog.V(11).Infof("exited %d (%d): %v", c.Cmd.Process.Pid, c.Cmd.ProcessState.ExitCode(), c.AsShellArgs())
+	c.log().V(CommandLogLevel).Info(fmt.Sprintf("exited: %v", c.AsShellArgs()), "pid", c.Process.Pid, "exit-status", c.Cmd.ProcessState.ExitCode())
 	if err != nil {
 		return
 	}
@@ -210,6 +222,7 @@ func shellQuote(s string) string {
 	return fmt.Sprintf("'%s'", strings.ReplaceAll(s, "'", `\'`))
 }
 
+// AsShellArgs returns an array of strings that will approximate as close as possible running this command as GoSH would run it in a POSIX shell
 func (c *Cmd) AsShellArgs() []string {
 	args := make([]string, 0, len(c.RawCmd))
 	args = append(args, shellQuote(c.Path))

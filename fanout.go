@@ -3,13 +3,14 @@ package gosh
 import (
 	"errors"
 
-	"k8s.io/klog/v2"
+	"github.com/go-logr/logr"
 )
 
 // A FanOutCmd runs a set of commands in parallel, with some limit as to how many can run concurrently
 type FanOutCmd struct {
 	Cmds           []Commander
 	MaxConcurrency int
+	Log            logr.Logger
 	sem            chan struct{}
 	cmdChan        chan Commander
 	errChan        chan error
@@ -25,6 +26,19 @@ var (
 // FanOut creates a new FanOutCmd that lets all commands run at the same time
 func FanOut(cmds ...Commander) *FanOutCmd {
 	return &FanOutCmd{Cmds: cmds, MaxConcurrency: len(cmds)}
+}
+
+// WithLog sets a log to use for this fanout
+func (f *FanOutCmd) WithLog(log logr.Logger) *FanOutCmd {
+	f.Log = log
+	return f
+}
+
+func (f *FanOutCmd) log() logr.Logger {
+	if f.Log.IsZero() {
+		return GlobalLog
+	}
+	return f.Log
 }
 
 // WithMaxConcurrency sets the maximum number of commans that can run at the same time
@@ -68,15 +82,15 @@ func (f *FanOutCmd) Start() error {
 			f.cmdChan <- cmd
 		}
 		close(f.cmdChan)
-		klog.V(11).Info("all commands pushed")
+		f.log().V(DebugLogLevel).Info("all commands pushed")
 	}()
 	for ix := 0; ix < f.MaxConcurrency; ix++ {
 		go func() {
-			klog.V(11).Info("fanout started")
+			f.log().V(DebugLogLevel).Info("fanout started")
 			defer func() {
 				f.sem <- struct{}{}
-				klog.V(11).Info("sem++")
-				klog.V(11).Info("fanout finished")
+				f.log().V(DebugLogLevel).Info("sem++")
+				f.log().V(DebugLogLevel).Info("fanout finished")
 			}()
 			killed := false
 			for !killed {
@@ -94,14 +108,14 @@ func (f *FanOutCmd) Start() error {
 							}
 							err := cmd.Start()
 							if err != nil {
-								klog.V(11).Info("Wrote err")
+								f.log().V(DebugLogLevel).Info("Wrote err")
 								f.errChan <- err
 								return
 							}
 							started = true
 
 						case _ = <-f.kill:
-							klog.V(11).Info("Got kill signal, emptying cmdChan")
+							f.log().V(DebugLogLevel).Info("Got kill signal, emptying cmdChan")
 							for range f.cmdChan {
 							}
 							killed = true
@@ -112,7 +126,7 @@ func (f *FanOutCmd) Start() error {
 						return
 					}
 					if started {
-						klog.V(11).Info("Wrote err")
+						f.log().V(DebugLogLevel).Info("Wrote err")
 						f.errChan <- cmd.Wait()
 					}
 				}()
@@ -122,9 +136,9 @@ func (f *FanOutCmd) Start() error {
 	go func() {
 		for ix := 0; ix < f.MaxConcurrency; ix++ {
 			_ = <-f.sem
-			klog.V(11).Info("sem--")
+			f.log().V(DebugLogLevel).Info("sem--")
 		}
-		klog.V(11).Info("all fanouts finished")
+		f.log().V(DebugLogLevel).Info("all fanouts finished")
 		close(f.errChan)
 	}()
 	return nil
@@ -134,12 +148,12 @@ func (f *FanOutCmd) Start() error {
 func (f *FanOutCmd) Wait() error {
 	errs := make([]error, 0, len(f.Cmds))
 	for err := range f.errChan {
-		klog.V(11).Info("Read err")
+		f.log().V(DebugLogLevel).Info("Read err")
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	klog.V(11).Info("all errors recorded")
+	f.log().V(DebugLogLevel).Info("all errors recorded")
 	if len(errs) != 0 {
 		return &MultiProcessError{Errors: errs}
 	}

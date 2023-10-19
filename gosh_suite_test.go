@@ -2,16 +2,17 @@ package gosh_test
 
 import (
 	"context"
+	stdlog "log"
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/stdr"
 	. "github.com/meln5674/gosh/pkg/gomega"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/klog/v2"
 
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -20,20 +21,16 @@ import (
 	"github.com/meln5674/gosh"
 )
 
+var log logr.Logger
+
 func TestGosh(t *testing.T) {
 	RegisterFailHandler(Fail)
-	klog.InitFlags(nil)
-	flag.Set("logtostderr", "false")
-	flag.Set("v", "11")
-	klog.SetOutput(GinkgoWriter)
+	stdr.SetVerbosity(20)
+	log = stdr.New(stdlog.New(GinkgoWriter, "", 0))
+	gosh.GlobalLog = log.WithName("GoSH")
 
 	RunSpecs(t, "Gosh Suite")
 }
-
-var _ = BeforeSuite(func() {
-
-	klog.SetOutput(GinkgoWriter)
-})
 
 type testError struct {
 	msg string
