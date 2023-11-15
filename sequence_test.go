@@ -192,7 +192,7 @@ var _ = Describe("Or", func() {
 				stderr: "",
 			})
 		})
-		It("report successfter it asynchronously", func() {
+		It("report success after it asynchronously", func() {
 			genericTest(genericTestArgs{
 				cmd: gosh.Or(
 					gosh.Shell(allOf(printStdout("1"), fail())),
@@ -347,6 +347,109 @@ var _ = Describe("Then", func() {
 		useMocks()
 		It("should not run later commands", func() {
 			cmd := gosh.Then(
+				gosh.Command("sleep", "3600"),
+				gosh.Shell(printStdout("This shouldn't be seen")),
+			).WithStreams(gosh.ForwardOut)
+			Expect(cmd.Start()).To(Succeed())
+			Expect(cmd.Kill()).To(Succeed())
+			err := cmd.Wait()
+			Expect(err).To(MatchMultiProcessError(gosh.ErrKilled))
+			Expect(mockStdout.String()).To(Equal(""))
+		})
+	})
+})
+
+var _ = Describe("All", func() {
+	When("Everything fails", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.ForwardErr),
+				stdin:  "",
+				stdout: "",
+				stderr: "123",
+				err:    &gosh.MultiProcessError{},
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(allOf(printStderr("1"), fail())),
+					gosh.Shell(allOf(printStderr("2"), fail())),
+					gosh.Shell(allOf(printStderr("3"), fail())),
+				).WithStreams(gosh.ForwardErr),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "123",
+				err:    &gosh.MultiProcessError{},
+			})
+		})
+	})
+	When("Everything succeeds", func() {
+		useMocks()
+		It("should run all commands", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(checkStdinLine("1")),
+					gosh.Shell(checkStdinLine("2")),
+					gosh.Shell(checkStdinLine("3")),
+				).WithStreams(gosh.ForwardIn),
+				stdin:  "1\n2\n3\n",
+				stdout: "",
+				stderr: "",
+			})
+		})
+		It("should run all commands asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(checkStdinLine("1")),
+					gosh.Shell(checkStdinLine("2")),
+					gosh.Shell(checkStdinLine("3")),
+				).WithStreams(gosh.ForwardIn),
+				async:  true,
+				stdin:  "1\n2\n3\n",
+				stdout: "",
+				stderr: "",
+			})
+		})
+	})
+	When("Using literal input", func() {
+		useMocks()
+		It("should work as expected", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(checkStdinChar('1')),
+					gosh.Shell(checkStdinChar('2')),
+					gosh.Shell(checkStdinChar('3')),
+				).WithStreams(gosh.StringIn("123"), gosh.ForwardOut, gosh.ForwardErr),
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+		})
+		It("should work as expected asynchronously", func() {
+			genericTest(genericTestArgs{
+				cmd: gosh.All(
+					gosh.Shell(checkStdinChar('1')),
+					gosh.Shell(checkStdinChar('2')),
+					gosh.Shell(checkStdinChar('3')),
+				).WithStreams(gosh.BytesIn([]byte("123"))),
+				async:  true,
+				stdin:  "",
+				stdout: "",
+				stderr: "",
+			})
+		})
+	})
+	When("killing", func() {
+		useMocks()
+		It("should not run later commands", func() {
+			cmd := gosh.All(
 				gosh.Command("sleep", "3600"),
 				gosh.Shell(printStdout("This shouldn't be seen")),
 			).WithStreams(gosh.ForwardOut)

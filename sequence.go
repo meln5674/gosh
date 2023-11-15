@@ -229,3 +229,16 @@ func Then(cmds ...Commander) *SequenceCmd {
 		cmds...,
 	)
 }
+
+// All executes a all of a sequence of tasks, ignoring failures, but reports failure if any commands failed
+func All(cmds ...Commander) *SequenceCmd {
+	return Sequence(
+		func(s *SequenceCmd, ix int, err error, killed bool) (continu bool, finalError error) {
+			if ix == len(cmds)-1 && len(s.CmdErrors) != 0 && !killed {
+				return true, &MultiProcessError{Errors: s.CmdErrors}
+			}
+			return true, err
+		},
+		cmds...,
+	)
+}
