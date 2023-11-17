@@ -1,7 +1,9 @@
 package gosh
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -126,6 +128,21 @@ func forwardOut(p Pipelineable) error {
 	return p.SetStdout(os.Stdout)
 }
 
+func ForwardOutWithPrefix(prefix string) StreamSetter {
+	return FuncOut(ForwardWithPrefix(os.Stdout, prefix))
+}
+
+func ForwardErrWithPrefix(prefix string) StreamSetter {
+	return FuncErr(ForwardWithPrefix(os.Stderr, prefix))
+}
+
+func ForwardOutErrWithPrefix(prefix string) StreamSetter {
+	return SetStreams(
+		ForwardOutWithPrefix(prefix),
+		ForwardErrWithPrefix(prefix),
+	)
+}
+
 func forwardErr(p Pipelineable) error {
 	return p.SetStderr(os.Stderr)
 }
@@ -160,6 +177,26 @@ func forwardAll(p Pipelineable) error {
 		return err
 	}
 	return ForwardOutErr(p)
+}
+
+// ForwardWithLineHandler produces a PipeSink which forwards to another writer, but mutates line-by-line
+func ForwardWithLineHandler(w io.Writer, f func(string) string) PipeSink {
+	return func(r io.Reader) error {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Println(f(line))
+		}
+		return scanner.Err()
+	}
+}
+
+// ForwardWithPrefix produces a PipeSink which forwards to another writer, but appends a prefix to each line.
+// No whitespace or punctuation is added between the prefix and the line, the caller is responsible
+// for including those in the value of prefix.
+// This can be useful to indicate that lines of a commands output are coming from a subcommand.
+func ForwardWithPrefix(w io.Writer, prefix string) PipeSink {
+	return ForwardWithLineHandler(w, func(s string) string { return prefix + s })
 }
 
 var (

@@ -16,6 +16,10 @@ bin/coverage.out: test
 view-coverage: bin/coverage.out
 	go tool cover -html=bin/coverage.out
 
+.PHONY: vet
+vet:
+	go vet ./...
+
 .PHONY: test
 test: bin $(GINKGO) gosh.go $(wildcard *_test.go)
 	$(GINKGO) run --trace --race -coverprofile=bin/coverage.out ./
